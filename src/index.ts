@@ -330,6 +330,50 @@ function emptyOps(): R2OperationsStats {
 }
 
 /**
+ * Cloudflare GraphQL 请求封装。
+ * 关键点：非 2xx 时把响应正文里的 errors[].message 一起带出来 ——
+ * Cloudflare 校验失败返回 400，真正的报错（unknown field / parsing args 等）在 body 里，
+ * 只报 HTTP 状态码等于把线索丢掉。
+ */
+async function graphqlRequest(
+  env: Env,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<any> {
+  const response = await fetchWithTimeout('https://api.cloudflare.com/client/v4/graphql', {
+    method: 'POST',
+    headers: {
+      // 手动注入跨账户 Token，SDK / 绑定不会代填
+      Authorization: 'Bearer ' + env.R2_API_TOKEN,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const text = await response.text();
+  let payload: any = null;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    payload = null;
+  }
+
+  const firstGraphqlError =
+    payload && Array.isArray(payload.errors) && payload.errors.length > 0
+      ? payload.errors[0]?.message
+      : null;
+
+  if (!response.ok) {
+    const detail = firstGraphqlError || text.slice(0, 300).replace(/\s+/g, ' ') || 'no_body';
+    throw new Error('graphql_' + response.status + ': ' + detail);
+  }
+  if (firstGraphqlError) {
+    throw new Error(String(firstGraphqlError));
+  }
+  return payload;
+}
+
+/**
  * 5.1 R2 存储容量 —— Cloudflare GraphQL Analytics API
  *     使用 r2StorageAdaptiveGroups 取最近 7 天内最新一条的 payloadSize / objectCount。
  *     时间字段以官方文档为准用 datetime；若该字段在 schema 里不存在，
@@ -349,24 +393,27 @@ async function fetchR2Storage(env: Env): Promise<R2StorageStats> {
     return result;
   }
 
-  // 参数内联：Cloudflare schema 标量写作 string / Time，
-  // 用变量声明容易因 String / string 大小写不匹配导致整条查询失败。
   const end = nowIso();
   const start = isoDaysAgo(7);
+  const variables = {
+    accountTag: env.R2_ACCOUNT_ID,
+    startDate: start,
+    endDate: end,
+    bucketName: env.R2_BUCKET_NAME,
+  };
 
-  // 时间字段在不同版本的 R2 schema 里叫 datetime 或 date：
-  // 先用当前文档的 datetime，字段不存在会自动回退到旧版的 date。
+  // 自定义标量 string / Time 必须用变量传，写成字面量会被拒（HTTP 400）。
+  // 时间字段文档是 datetime，若 schema 里不存在则回退旧版 date。
   let lastError = 'no_analytics_data';
   for (const timeField of ['datetime', 'date'] as const) {
     try {
       const query =
-        'query {' +
+        'query R2StorageUsage($accountTag: string!, $startDate: Time, $endDate: Time, $bucketName: string) {' +
         '  viewer {' +
-        '    accounts(filter: { accountTag: ' + JSON.stringify(env.R2_ACCOUNT_ID) + ' }) {' +
+        '    accounts(filter: { accountTag: $accountTag }) {' +
         '      r2StorageAdaptiveGroups(' +
-        '        limit: 1' +
-        '        filter: { ' + timeField + '_geq: ' + JSON.stringify(start) + ', ' + timeField + '_leq: ' + JSON.stringify(end) +
-        ', bucketName: ' + JSON.stringify(env.R2_BUCKET_NAME) + ' }' +
+        '        limit: 10000' +
+        '        filter: { ' + timeField + '_geq: $startDate, ' + timeField + '_leq: $endDate, bucketName: $bucketName }' +
         '        orderBy: [' + timeField + '_DESC]' +
         '      ) {' +
         '        max { payloadSize objectCount }' +
@@ -376,28 +423,8 @@ async function fetchR2Storage(env: Env): Promise<R2StorageStats> {
         '  }' +
         '}';
 
-      const response = await fetchWithTimeout('https://api.cloudflare.com/client/v4/graphql', {
-        method: 'POST',
-        headers: {
-          // 手动注入跨账户 Token
-          Authorization: 'Bearer ' + env.R2_API_TOKEN,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query }),
-      });
-
-      if (!response.ok) throw new Error('graphql_http_' + response.status);
-
-      const payload = (await response.json()) as {
-        data?: { viewer?: { accounts?: Array<{ r2StorageAdaptiveGroups?: Array<{ max?: { payloadSize?: unknown; objectCount?: unknown } }> }> } };
-        errors?: Array<{ message?: string }>;
-      };
-
-      if (Array.isArray(payload.errors) && payload.errors.length > 0) {
-        throw new Error(payload.errors[0]?.message || 'graphql_error');
-      }
-
-      const groups = payload.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups;
+      const payload = await graphqlRequest(env, query, variables);
+      const groups = payload?.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups;
       const latest = Array.isArray(groups) ? groups[0]?.max : undefined;
       if (!latest) {
         result.error = 'no_analytics_data';
@@ -428,7 +455,7 @@ async function fetchR2Storage(env: Env): Promise<R2StorageStats> {
  *           https://developers.cloudflare.com/r2/pricing/
  *
  *     这里刻意不按 bucketName 过滤：免费额度是按账号计的，按桶过滤会低估用量。
- *     参数内联进 query，避开 Cloudflare schema 里 string / String 标量命名差异。
+ *     参数必须用变量传：自定义标量 string / Time 不接受字面量。
  */
 async function fetchR2Operations(env: Env): Promise<R2OperationsStats> {
   const limitA = parseCount(env.R2_CLASS_A_LIMIT, DEFAULT_R2_CLASS_A_LIMIT);
@@ -443,68 +470,59 @@ async function fetchR2Operations(env: Env): Promise<R2OperationsStats> {
     return result;
   }
 
-  const query =
-    'query {' +
-    '  viewer {' +
-    '    accounts(filter: { accountTag: ' + JSON.stringify(env.R2_ACCOUNT_ID) + ' }) {' +
-    '      r2OperationsAdaptiveGroups(' +
-    '        limit: 10000' +
-    '        filter: { datetime_geq: ' + JSON.stringify(start) + ', datetime_leq: ' + JSON.stringify(end) + ' }' +
-    '      ) {' +
-    '        sum { requests }' +
-    '        dimensions { actionType }' +
-    '      }' +
-    '    }' +
-    '  }' +
-    '}';
+  const variables = { accountTag: env.R2_ACCOUNT_ID, startDate: start, endDate: end };
+  let lastError = 'no_analytics_data';
 
-  try {
-    const response = await fetchWithTimeout('https://api.cloudflare.com/client/v4/graphql', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + env.R2_API_TOKEN,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ query }),
-    });
+  for (const timeField of ['datetime', 'date'] as const) {
+    try {
+      const query =
+        'query R2OperationsVolume($accountTag: string!, $startDate: Time, $endDate: Time) {' +
+        '  viewer {' +
+        '    accounts(filter: { accountTag: $accountTag }) {' +
+        '      r2OperationsAdaptiveGroups(' +
+        '        limit: 10000' +
+        '        filter: { ' + timeField + '_geq: $startDate, ' + timeField + '_leq: $endDate }' +
+        '      ) {' +
+        '        sum { requests }' +
+        '        dimensions { actionType }' +
+        '      }' +
+        '    }' +
+        '  }' +
+        '}';
 
-    if (!response.ok) throw new Error('graphql_http_' + response.status);
+      const payload = await graphqlRequest(env, query, variables);
+      const groups = payload?.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups;
+      const list = Array.isArray(groups) ? groups : [];
 
-    const payload = (await response.json()) as {
-      data?: { viewer?: { accounts?: Array<{ r2OperationsAdaptiveGroups?: Array<{ sum?: { requests?: unknown }; dimensions?: { actionType?: unknown } }> }> } };
-      errors?: Array<{ message?: string }>;
-    };
+      let usedA = 0;
+      let usedB = 0;
+      let freeUsed = 0;
+      const byAction: R2OpAction[] = [];
 
-    if (Array.isArray(payload.errors) && payload.errors.length > 0) {
-      throw new Error(payload.errors[0]?.message || 'graphql_error');
+      for (const group of list) {
+        const action = String(group?.dimensions?.actionType ?? 'unknown');
+        const requests = num(group?.sum?.requests) ?? 0;
+        const opClass = classifyR2Action(action);
+        byAction.push({ action, requests, opClass });
+        if (opClass === 'A') usedA += requests;
+        else if (opClass === 'B') usedB += requests;
+        else if (opClass === 'free') freeUsed += requests;
+      }
+
+      byAction.sort((left, right) => right.requests - left.requests);
+      result.byAction = byAction;
+      result.classA = buildOpQuota(usedA, limitA);
+      result.classB = buildOpQuota(usedB, limitB);
+      result.freeRequests = freeUsed;
+      result.error = null;
+      return result;
+    } catch (error) {
+      lastError = errorMessage(error);
     }
-
-    const groups = payload.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups;
-    const list = Array.isArray(groups) ? groups : [];
-
-    let usedA = 0;
-    let usedB = 0;
-    let freeUsed = 0;
-
-    for (const group of list) {
-      const action = String(group?.dimensions?.actionType ?? 'unknown');
-      const requests = num(group?.sum?.requests) ?? 0;
-      const opClass = classifyR2Action(action);
-      result.byAction.push({ action, requests, opClass });
-      if (opClass === 'A') usedA += requests;
-      else if (opClass === 'B') usedB += requests;
-      else if (opClass === 'free') freeUsed += requests;
-    }
-
-    result.byAction.sort((left, right) => right.requests - left.requests);
-    result.classA = buildOpQuota(usedA, limitA);
-    result.classB = buildOpQuota(usedB, limitB);
-    result.freeRequests = freeUsed;
-    return result;
-  } catch (error) {
-    result.error = errorMessage(error);
-    return result;
   }
+
+  result.error = lastError;
+  return result;
 }
 
 /**
