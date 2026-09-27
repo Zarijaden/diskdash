@@ -46,6 +46,9 @@ R2_BUCKET_NAME = "bkr2"
 # R2 总配额（GraphQL 不返回配额，需自行预设）。支持 "100GB" / "1TB" / 纯字节数。
 # 留空则无法计算使用率，前端只显示已用量。
 R2_TOTAL_CAPACITY = "10GB"
+# R2 操作每月免费额度（Class A 默认 100 万，Class B 默认 1000 万；可覆盖）
+R2_CLASS_A_LIMIT = "1000000"
+R2_CLASS_B_LIMIT = "10000000"
 
 # ---------------------------------------------------------------------------
 # 2) ImgHub / Infinicloud (WebDAV) —— 二者是同一个 WebDAV，不分开

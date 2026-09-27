@@ -288,6 +288,58 @@
   .bar-fill.na { background: rgba(255, 255, 255, 0.12); }
   .bar-fill.err { background: var(--error); }
 
+  /* ---------------- R2 操作明细 ---------------- */
+  .ops-block { display: flex; flex-direction: column; gap: 8px; }
+  .subhead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .subhead-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .subhead-period { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; color: var(--muted-2); }
+  .actions { display: flex; flex-direction: column; }
+  .action-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 0;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .action-row:first-child { border-top: none; }
+  .action-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .action-count { color: var(--muted); }
+  .action-empty {
+    padding: 12px 0;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    color: var(--muted-2);
+  }
+  .chip {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 8px;
+    letter-spacing: 0.12em;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--muted);
+  }
+  .chip.a { color: var(--accent); border-color: rgba(212, 255, 0, 0.35); }
+  .chip.b { color: var(--text); border-color: rgba(255, 255, 255, 0.2); }
+  .chip.free, .chip.other { color: var(--muted-2); }
+
   /* ---------------- 底部动作栏 ---------------- */
   .bottombar {
     display: flex;
@@ -411,6 +463,14 @@
       </div>
 
       <div class="bars" id="bars"></div>
+
+      <div class="ops-block">
+        <div class="subhead">
+          <span class="subhead-title">R2 操作明细 / 本月</span>
+          <span class="subhead-period" id="opsPeriod">--</span>
+        </div>
+        <div class="actions" id="opsActions"></div>
+      </div>
     </section>
   </main>
 
@@ -463,6 +523,8 @@
 
   var BAR_DEFS = [
     { key: 'r2Storage', label: 'R2 存储容量', type: 'quota' },
+    { key: 'r2OpsClassA', label: 'R2 CLASS A 操作（本月）', type: 'ops' },
+    { key: 'r2OpsClassB', label: 'R2 CLASS B 操作（本月）', type: 'ops' },
     { key: 'imghub', label: 'IMG HUB / INFINICLOUD (WEBDAV)', type: 'quota' }
   ];
 
@@ -560,6 +622,27 @@
   function describeBar(def, stat) {
     if (!stat) return { text: '<span class="muted">N/A</span>', pct: 0, cls: 'na' };
 
+    if (def.type === 'ops') {
+      if (stat.used === null || stat.used === undefined) {
+        return {
+          text: '<span class="muted">' + (stat.error ? '读取失败' : 'N/A') + '</span>',
+          pct: 0,
+          cls: 'na'
+        };
+      }
+      var opsPct = stat.percentage;
+      if (opsPct === null || opsPct === undefined) {
+        opsPct = stat.limit ? (stat.used / stat.limit) * 100 : 0;
+      }
+      opsPct = clampPercent(opsPct);
+      return {
+        text: escapeHtml(formatNumber(stat.used) || '0') + ' / ' + escapeHtml(formatNumber(stat.limit) || '--') +
+              ' <span class="muted">余 ' + escapeHtml(formatNumber(stat.remaining) || '0') + '</span>',
+        pct: opsPct,
+        cls: 'dim'
+      };
+    }
+
     var hasUsage = stat.usedBytes !== null && stat.usedBytes !== undefined;
     var hasTotal = stat.totalBytes !== null && stat.totalBytes !== undefined;
 
@@ -607,6 +690,46 @@
     }).join('');
   }
 
+  function opsBar(ops, key) {
+    if (!ops || !ops[key]) return { error: ops ? ops.error : 'no_data' };
+    var quota = ops[key];
+    return {
+      used: quota.used,
+      limit: quota.limit,
+      remaining: quota.remaining,
+      percentage: quota.percentage,
+      error: ops.error
+    };
+  }
+
+  function renderOpsActions(ops) {
+    var el = document.getElementById('opsActions');
+    var periodEl = document.getElementById('opsPeriod');
+    if (!el) return;
+
+    if (periodEl) {
+      periodEl.textContent = ops && ops.periodStart
+        ? new Date(ops.periodStart).toLocaleDateString('zh-CN') + ' → NOW'
+        : '--';
+    }
+
+    var list = (ops && ops.byAction) || [];
+    if (!list.length) {
+      el.innerHTML = '<div class="action-empty">' +
+        (ops && ops.error ? 'OPS SOURCE ERROR' : 'NO OPS DATA') + '</div>';
+      return;
+    }
+
+    el.innerHTML = list.map(function (item) {
+      var cls = String(item.opClass || 'other').toLowerCase();
+      return '<div class="action-row">' +
+        '<span class="chip ' + cls + '">' + escapeHtml(String(item.opClass || '?').toUpperCase()) + '</span>' +
+        '<span class="action-name">' + escapeHtml(item.action) + '</span>' +
+        '<span class="action-count">' + escapeHtml(formatNumber(item.requests) || '0') + '</span>' +
+      '</div>';
+    }).join('');
+  }
+
   /* ---------------- 渲染：总入口 ---------------- */
   function render(data) {
     if (!data) return;
@@ -628,8 +751,13 @@
     document.getElementById('r2Objects').textContent = formatNumber(r2.objectCount) || '--';
     document.getElementById('r2Status').textContent = r2.error ? 'DEGRADED' : 'ONLINE';
 
+    var ops = data.r2Operations || null;
+    data.r2OpsClassA = opsBar(ops, 'classA');
+    data.r2OpsClassB = opsBar(ops, 'classB');
+
     renderMounts(data.openlist);
     renderBars(data);
+    renderOpsActions(ops);
 
     var updated = data.updatedAt ? new Date(data.updatedAt) : null;
     document.getElementById('updatedAt').textContent = 'LAST SYNC: ' +

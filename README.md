@@ -13,17 +13,18 @@
 
 ## 数据流
 
-    Cron 03:00 UTC ─► collectAll() ─► Promise.allSettled(3 个数据源)
+    Cron 03:00 UTC ─► collectAll() ─► Promise.allSettled(4 个数据源)
                                   └► STATS_KV.put('stats_data', json)
 
     浏览器 ─► GET /api/stats ─► Cache API(5min) ─命中─► 返回
                                      └─未命中─► KV ─► 写缓存 ─► 返回
 
-## 三个数据源
+## 四个数据源
 
 | 模块 | 获取方式 | 失败表现 |
 | --- | --- | --- |
 | R2 存储容量 | 跨账户 API Token 调 Cloudflare GraphQL Analytics `r2StorageAdaptiveGroups` | 卡片显示 `DEGRADED` |
+| R2 操作额度 | 同一个 Token 调 `r2OperationsAdaptiveGroups`，本月按 Class A / B 汇总已用与余额 | 只该区块显示 N/A，不影响 R2 存储 |
 | ImgHub / Infinicloud | 二者是同一个 WebDAV：`PROPFIND` 读取 `quota-used-bytes` / `quota-available-bytes` | 显示 N/A |
 | OpenList | `GET /api/admin/storage/list`，只取挂载点名 | 挂载区显示 source error |
 
@@ -54,7 +55,7 @@
 所有 `YOUR_...` 都要替换，重点是：
 
 - `ALLOWED_ORIGIN`：你的 Pages 域名（可多个，逗号分隔）
-- `R2_ACCOUNT_ID` / `R2_BUCKET_NAME` / `R2_TOTAL_CAPACITY`
+- `R2_ACCOUNT_ID` / `R2_BUCKET_NAME` / `R2_TOTAL_CAPACITY` / `R2_CLASS_A_LIMIT` / `R2_CLASS_B_LIMIT`
 - `IMGHUB_WEBDAV_URL` / `IMGHUB_PROXY_URL`
 - `OPENLIST_BASE_URL`
 
