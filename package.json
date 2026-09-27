@@ -1,0 +1,19 @@
+{
+  "name": "diskdash",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker + Pages 静态网盘控制台",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "kv:create": "wrangler kv namespace create STATS_KV"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^3.101.0"
+  }
+}

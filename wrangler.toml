@@ -1,0 +1,63 @@
+#:schema node_modules/wrangler/config-schema.json
+# ============================================================================
+#  DiskDash — Cloudflare Worker 配置
+#  部署前请把所有 YOUR_... 占位符替换为真实值。
+#  敏感信息（Token / Key）请勿写在本文件，使用：
+#    npx wrangler secret put R2_API_TOKEN
+#    npx wrangler secret put IMGHUB_API_KEY
+#    npx wrangler secret put OPENLIST_TOKEN
+# ============================================================================
+
+name = "diskdash-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---- 定时任务：每天 UTC 03:00 抓取一次（cron 使用 UTC 时区）----
+[triggers]
+crons = ["0 3 * * *"]
+
+# ---- 可观测性（可选）----
+[observability]
+enabled = true
+
+# ---- KV：保存最近一次抓取的 stats_data ----
+# 先执行：npx wrangler kv namespace create STATS_KV
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "b4604705200f4a88b7cb09b9a1beb8ad"
+preview_id = "YOUR_KV_PREVIEW_NAMESPACE_ID"
+
+# ============================================================================
+#  非敏感配置（vars）
+# ============================================================================
+[vars]
+# 【必填】允许跨域访问的 Pages 源。可写多个，用英文逗号分隔，不要带结尾斜杠。
+# 例如："https://diskdash.pages.dev,https://disk.example.com"
+ALLOWED_ORIGIN = "https://zarijaden.cc.cd"
+
+# ---------------------------------------------------------------------------
+# 1) R2 存储容量（GraphQL Analytics API · 跨账户 API Token）
+# ---------------------------------------------------------------------------
+# R2 所属的 Cloudflare 账号 ID（Account Tag），从环境变量读取
+R2_ACCOUNT_ID = "ca3c605461ab9e3e97d0de8392fb457a"
+# R2 存储桶名称
+R2_BUCKET_NAME = "bkr2"
+# R2 总配额（GraphQL 不返回配额，需自行预设）。支持 "100GB" / "1TB" / 纯字节数。
+# 留空则无法计算使用率，前端只显示已用量。
+R2_TOTAL_CAPACITY = "10GB"
+
+# ---------------------------------------------------------------------------
+# 2) ImgHub / Infinicloud (WebDAV) —— 二者是同一个 WebDAV，不分开
+# ---------------------------------------------------------------------------
+# WebDAV 根地址（InfiniCLOUD / TeraCloud 的 WebDAV 端点），用于 PROPFIND 探测配额
+IMGHUB_WEBDAV_URL = "https://aki.teracloud.jp/dav/"
+# ImgHub 后台地址，/api/proxy/imghub 代理跳转的目标
+IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
+
+# ---------------------------------------------------------------------------
+# 3) OpenList
+# ---------------------------------------------------------------------------
+OPENLIST_BASE_URL = "https://YOUR_OPENLIST_HOST"
+# proxy = Worker 反向代理并注入 Token（默认）；redirect = 直接 302 到真实后台
+OPENLIST_PROXY_MODE = "proxy"
