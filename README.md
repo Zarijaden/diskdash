@@ -106,3 +106,24 @@
 
 前端可以起任意静态服务器指向 `public/`，并把 `API_BASE` 指向 `http://localhost:8787`。
 注意本地调试时 `Origin` 需要加进 `ALLOWED_ORIGIN`。
+
+## 部署排错：Unexpected token 'export'
+
+如果部署后面板报：
+
+    Uncaught SyntaxError: Unexpected token 'export' at diskdash-worker:20
+
+说明**上传的是未打包的 `src/index.ts` 原文**（第 20 行正好是 `export interface Env`），
+被当成 classic（service worker）脚本解析了。只有 module worker 才允许顶层 `export`。
+
+正确做法是用 wrangler 打包部署（wrangler 会自动剥离类型并输出 ESM）：
+
+    npm install
+    npx wrangler deploy
+
+自查：部署成功后，面板里 Worker 代码开头应是 `var __defProp = ...`，结尾是
+`export { ... src_default as default };`，而不是 `export interface`。
+
+如果只能通过面板粘贴代码，先本地打包，再粘贴 `dist/index.js` 的内容：
+
+    npm run build
