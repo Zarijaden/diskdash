@@ -435,11 +435,19 @@
    * 如果通过自定义域把 /api/* 路由到 Worker（与 Pages 同域），留空即可。
    * ======================================================================= */
   var CONFIG = {
-    API_BASE: 'YOUR_WORKER_URL'
+    // Worker 的地址，必须是 https:// 开头的绝对地址。
+    // 只有当 /api/* 通过同域路由交给 Worker 时，才可以留空字符串。
+    API_BASE: 'https://dd.zarijaden.cc.cd'
   };
 
+  // API_BASE 必须是绝对地址：若不带协议，浏览器会把 'YOUR_WORKER_URL/api/stats'
+  // 当成相对路径拼在当前页 origin 后面，结果变成请求 Pages 自己。
   function api(path) {
-    return (CONFIG.API_BASE || '').replace(/\/+$/, '') + path;
+    var base = (CONFIG.API_BASE || '').trim().replace(/\/+$/, '');
+    if (base && !/^https?:\/\//i.test(base)) {
+      throw new Error('CONFIG.API_BASE 必须是 https:// 开头的绝对地址（当前：' + base + '）');
+    }
+    return base + path;
   }
 
   /* ---------------- 常量 & DOM ---------------- */
@@ -539,7 +547,11 @@
     Array.prototype.forEach.call(gridEl.querySelectorAll('.mount'), function (node) {
       node.addEventListener('click', function () {
         // 代理跳转：Worker 会注入 OPENLIST_TOKEN
-        window.open(api('/api/proxy/openlist'), '_blank', 'noopener');
+        try {
+          window.open(api('/api/proxy/openlist'), '_blank', 'noopener');
+        } catch (error) {
+          showToast(error.message, true);
+        }
       });
     });
   }
@@ -627,7 +639,11 @@
   /* ---------------- 数据获取 ---------------- */
   function load() {
     setSyncState('LOADING');
-    return fetch(api('/api/stats'), { cache: 'no-store' })
+    // 用 Promise 包一层，让 api() 抛出的配置错误也能被下面的 .catch 捕获
+    return Promise.resolve()
+      .then(function () {
+        return fetch(api('/api/stats'), { cache: 'no-store' });
+      })
       .then(function (response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.json();
@@ -639,7 +655,7 @@
       .catch(function (error) {
         console.error('[diskdash] stats failed', error);
         setSyncState('OFFLINE');
-        showToast('数据加载失败', true);
+        showToast(error && error.message ? error.message : '数据加载失败', true);
       });
   }
 
@@ -648,7 +664,8 @@
     refreshBtn.textContent = '正在拉取数据...';
     setSyncState('SYNCING');
 
-    fetch(api('/api/refresh'), { method: 'POST' })
+    Promise.resolve()
+      .then(function () { return fetch(api('/api/refresh'), { method: 'POST' }); })
       .then(function (response) {
         return response.json().then(function (body) {
           return { status: response.status, body: body };

@@ -34,7 +34,7 @@ preview_id = "YOUR_KV_PREVIEW_NAMESPACE_ID"
 [vars]
 # 【必填】允许跨域访问的 Pages 源。可写多个，用英文逗号分隔，不要带结尾斜杠。
 # 例如："https://diskdash.pages.dev,https://disk.example.com"
-ALLOWED_ORIGIN = "https://zarijaden.cc.cd"
+ALLOWED_ORIGIN = "https://zarijaden.cc.cd,https://diskdash.pages.dev"
 
 # ---------------------------------------------------------------------------
 # 1) R2 存储容量（GraphQL Analytics API · 跨账户 API Token）
