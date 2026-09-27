@@ -13,24 +13,23 @@
 
 ## 数据流
 
-    Cron 03:00 UTC ─► collectAll() ─► Promise.allSettled(4 个数据源)
+    Cron 03:00 UTC ─► collectAll() ─► Promise.allSettled(3 个数据源)
                                   └► STATS_KV.put('stats_data', json)
 
     浏览器 ─► GET /api/stats ─► Cache API(5min) ─命中─► 返回
                                      └─未命中─► KV ─► 写缓存 ─► 返回
 
-## 四个数据源
+## 三个数据源
 
 | 模块 | 获取方式 | 失败表现 |
 | --- | --- | --- |
-| R2 存储容量 | 跨账户 API Token 调 Cloudflare GraphQL Analytics `r2StorageAdaptiveGroups` | 卡片显示 `DEGRADED` |
-| R2 操作额度 | 同一个 Token 调 `r2OperationsAdaptiveGroups`，本月按 Class A / B 汇总已用与余额 | 只该区块显示 N/A，不影响 R2 存储 |
+| R2 存储 + 操作额度 | `GET R2_USAGE_API_URL`：存储走 REST 逐桶实时统计，操作数走 GraphQL（约 24h 延迟） | R2 卡片显示 `DEGRADED` |
 | ImgHub / Infinicloud | 二者是同一个 WebDAV：`PROPFIND` 读取 `quota-used-bytes` / `quota-available-bytes` | 显示 N/A |
 | OpenList | `GET /api/admin/storage/list`，只取挂载点名 | 挂载区显示 source error |
 
-> R2 使用**跨账户 API Token**：`R2_ACCOUNT_ID` 是要查询的账号 ID，`R2_API_TOKEN` 是具备该账号
-> Account Analytics Read 权限的 Token，二者均从 Worker 环境变量读取；GraphQL 请求头由 Worker
-> 手动写入 `Authorization: Bearer <R2_API_TOKEN>`。
+> R2 不再直连 Cloudflare GraphQL：用量由自家接口 `https://r2usage.zpbk.cc.cd/api` 提供，
+> 地址可用 `R2_USAGE_API_URL` 覆盖。每月免费额度（接口只给已用量）在
+> `R2_CLASS_A_LIMIT` / `R2_CLASS_B_LIMIT` 里配置。
 
 ## 部署步骤
 
@@ -46,7 +45,6 @@
 
 ### 3. 写入密钥（不要写进 wrangler.toml）
 
-    npx wrangler secret put R2_API_TOKEN        # 跨账户 Token，权限：Account Analytics Read
     npx wrangler secret put IMGHUB_API_KEY
     npx wrangler secret put OPENLIST_TOKEN
 
@@ -55,7 +53,7 @@
 所有 `YOUR_...` 都要替换，重点是：
 
 - `ALLOWED_ORIGIN`：你的 Pages 域名（可多个，逗号分隔）
-- `R2_ACCOUNT_ID` / `R2_BUCKET_NAME` / `R2_TOTAL_CAPACITY` / `R2_CLASS_A_LIMIT` / `R2_CLASS_B_LIMIT`
+- `R2_USAGE_API_URL` / `R2_TOTAL_CAPACITY` / `R2_CLASS_A_LIMIT` / `R2_CLASS_B_LIMIT`
 - `IMGHUB_WEBDAV_URL` / `IMGHUB_PROXY_URL`
 - `OPENLIST_BASE_URL`
 
@@ -128,3 +126,4 @@
 如果只能通过面板粘贴代码，先本地打包，再粘贴 `dist/index.js` 的内容：
 
     npm run build
+

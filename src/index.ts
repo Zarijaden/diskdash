@@ -3,7 +3,7 @@
  *  DiskDash Worker — Cloudflare 边缘后端
  * ----------------------------------------------------------------------------
  *  职责：
- *   1. 定时（每日 03:00 UTC）通过 Promise.allSettled 并行抓取 4 个数据源，
+ *   1. 定时（每日 03:00 UTC）通过 Promise.allSettled 并行抓取 3 个数据源，
  *      拼装成统一 StatsData 并写入 KV。
  *   2. GET  /api/stats           读 Cache API（5 分钟）-> 回源 KV
  *   3. POST /api/refresh         手动刷新（KV 记录 last_refresh_time 防连点）
@@ -24,10 +24,10 @@ export interface Env {
   /** 【必填】允许跨域的 Pages 源，多个用英文逗号分隔 */
   ALLOWED_ORIGIN: string;
 
-  /* ---- R2 存储容量（跨账户 API Token）---- */
-  R2_ACCOUNT_ID: string;
-  R2_BUCKET_NAME: string;
-  /** R2 总配额，支持 "100GB" / "1TB" / 纯字节数；为空则无法计算百分比 */
+  /* ---- R2 用量 API（一个接口同时返回存储 + 操作）---- */
+  /** 用量接口地址，默认 https://r2usage.zpbk.cc.cd/api */
+  R2_USAGE_API_URL?: string;
+  /** 兜底：接口没返回 totalBytes 时用它算百分比，支持 "100GB" / 纯字节数 */
   R2_TOTAL_CAPACITY?: string;
   /** 每月免费额度：Class A，默认 1000000 */
   R2_CLASS_A_LIMIT?: string;
@@ -44,7 +44,6 @@ export interface Env {
   OPENLIST_PROXY_MODE?: string;
 
   /* ---- Secrets：用 wrangler secret put 写入，不要放进 wrangler.toml ---- */
-  R2_API_TOKEN?: string;
   IMGHUB_API_KEY?: string;
   OPENLIST_TOKEN?: string;
 }
@@ -59,8 +58,23 @@ export interface QuotaStats {
   error: string | null;
 }
 
+/** 单桶存储明细（来自用量接口的 REST 逐桶统计） */
+export interface R2BucketUsage {
+  name: string;
+  usedBytes: number | null;
+  objectCount: number | null;
+}
+
 export interface R2StorageStats extends QuotaStats {
   objectCount: number | null;
+  /** 快照时间，REST 实时统计的时刻 */
+  snapshotAt: string | null;
+  /** 数据来源标记，例如 "rest_api" */
+  source: string | null;
+  /** 桶数量 */
+  bucketCount: number | null;
+  /** 逐桶明细 */
+  buckets: R2BucketUsage[];
 }
 
 /** R2 操作计费类别：Class A / Class B / 免费 / 文档未列出 */
@@ -90,6 +104,8 @@ export interface R2OperationsStats {
   /** 免费操作（DeleteObject / AbortMultipartUpload 等）本月请求数 */
   freeRequests: number | null;
   byAction: R2OpAction[];
+  /** 数据来源标记，例如 "graphql" */
+  source: string | null;
   error: string | null;
 }
 
@@ -129,25 +145,7 @@ const JSON_HEADERS: Record<string, string> = {
   'Content-Type': 'application/json; charset=utf-8',
 };
 
-/**
- * R2 操作分类，来源：https://developers.cloudflare.com/r2/pricing/
- * 文档未列出的 actionType 归入 other，不计入 A / B 额度。
- */
-const R2_CLASS_A_ACTIONS = new Set<string>([
-  'ListBuckets', 'PutBucket', 'ListObjects', 'PutObject', 'CopyObject',
-  'CompleteMultipartUpload', 'CreateMultipartUpload', 'LifecycleStorageTierTransition',
-  'ListMultipartUploads', 'UploadPart', 'UploadPartCopy', 'ListParts',
-  'PutBucketEncryption', 'PutBucketCors', 'PutBucketLifecycleConfiguration',
-]);
-const R2_CLASS_B_ACTIONS = new Set<string>([
-  'HeadBucket', 'HeadObject', 'GetObject', 'UsageSummary',
-  'GetBucketEncryption', 'GetBucketLocation', 'GetBucketCors',
-  'GetBucketLifecycleConfiguration',
-]);
-const R2_FREE_ACTIONS = new Set<string>([
-  'DeleteObject', 'DeleteBucket', 'AbortMultipartUpload',
-]);
-
+const DEFAULT_R2_USAGE_API_URL = 'https://r2usage.zpbk.cc.cd/api';
 const DEFAULT_R2_CLASS_A_LIMIT = 1_000_000;
 const DEFAULT_R2_CLASS_B_LIMIT = 10_000_000;
 
@@ -208,13 +206,6 @@ function parseCount(input: string | undefined, fallback: number): number {
   return parsed !== null && parsed > 0 ? parsed : fallback;
 }
 
-function classifyR2Action(action: string): R2OpClass {
-  if (R2_CLASS_A_ACTIONS.has(action)) return 'A';
-  if (R2_CLASS_B_ACTIONS.has(action)) return 'B';
-  if (R2_FREE_ACTIONS.has(action)) return 'free';
-  return 'other';
-}
-
 function buildOpQuota(used: number, limit: number): R2OpQuota {
   return {
     used,
@@ -228,11 +219,6 @@ function buildOpQuota(used: number, limit: number): R2OpQuota {
 function currentMonthRange(now: Date = new Date()): { start: string; end: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   return { start: start.toISOString(), end: now.toISOString() };
-}
-
-/** N 天前的 ISO 时间 */
-function isoDaysAgo(days: number, now: Date = new Date()): string {
-  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 /** 读取 WebDAV XML 中的数字属性（例如 quota-used-bytes），避免引入 XML 解析库 */
@@ -310,7 +296,7 @@ function corsHeaders(origin: string | null, env: Env): Record<string, string> {
  * ========================================================================= */
 
 function emptyR2Storage(totalBytes: number | null = null): R2StorageStats {
-  return { usedBytes: null, totalBytes, usagePercent: null, objectCount: null, error: null };
+  return { usedBytes: null, totalBytes, usagePercent: null, objectCount: null, snapshotAt: null, source: null, bucketCount: null, buckets: [], error: null };
 }
 
 function emptyQuota(): QuotaStats {
@@ -325,204 +311,123 @@ function emptyOps(): R2OperationsStats {
     classB: null,
     freeRequests: null,
     byAction: [],
+    source: null,
     error: null,
   };
 }
 
 /**
- * Cloudflare GraphQL 请求封装。
- * 关键点：非 2xx 时把响应正文里的 errors[].message 一起带出来 ——
- * Cloudflare 校验失败返回 400，真正的报错（unknown field / parsing args 等）在 body 里，
- * 只报 HTTP 状态码等于把线索丢掉。
+ * 5.1 R2 用量 —— 自家用量接口，一次返回存储容量 + 操作额度。
+ *
+ *     GET https://r2usage.zpbk.cc.cd/api
+ *     {
+ *       "month": "2026-09",
+ *       "operations": { "classA": 281, "classB": 325, "total": 606, "source": "graphql" },
+ *       "storage": {
+ *         "usedBytes": 584972225, "usedGB": 0.5448,
+ *         "totalBytes": 10737418240, "totalGB": 10,
+ *         "usagePercent": 5.448, "snapshotAt": "2026-09-27T07:33:17.029Z",
+ *         "source": "rest_api", "bucketCount": 3,
+ *         "buckets": [
+ *           { "name": "bkr2", "payloadBytes": 525205324, "metadataBytes": 667,
+ *             "usedBytes": 525205991, "objectCount": 26 }
+ *         ]
+ *       },
+ *       "fetchedAt": "2026-09-27T07:33:17.029Z"
+ *     }
+ *
+ *     存储来自 REST 逐桶实时统计，操作数来自 GraphQL（约 24h 延迟）。
+ *     两者共用一个请求，封装成一个函数同时返回，失败时各自标记 error。
  */
-async function graphqlRequest(
-  env: Env,
-  query: string,
-  variables: Record<string, unknown>,
-): Promise<any> {
-  const response = await fetchWithTimeout('https://api.cloudflare.com/client/v4/graphql', {
-    method: 'POST',
-    headers: {
-      // 手动注入跨账户 Token，SDK / 绑定不会代填
-      Authorization: 'Bearer ' + env.R2_API_TOKEN,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  const text = await response.text();
-  let payload: any = null;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    payload = null;
-  }
-
-  const firstGraphqlError =
-    payload && Array.isArray(payload.errors) && payload.errors.length > 0
-      ? payload.errors[0]?.message
-      : null;
-
-  if (!response.ok) {
-    const detail = firstGraphqlError || text.slice(0, 300).replace(/\s+/g, ' ') || 'no_body';
-    throw new Error('graphql_' + response.status + ': ' + detail);
-  }
-  if (firstGraphqlError) {
-    throw new Error(String(firstGraphqlError));
-  }
-  return payload;
+interface R2UsageBundle {
+  storage: R2StorageStats;
+  operations: R2OperationsStats;
 }
 
-/**
- * 5.1 R2 存储容量 —— Cloudflare GraphQL Analytics API
- *     使用 r2StorageAdaptiveGroups 取最近 7 天内最新一条的 payloadSize / objectCount。
- *     时间字段以官方文档为准用 datetime；若该字段在 schema 里不存在，
- *     会自动回退到旧版的 date 再试一次，避免整块失效。
- *
- *     跨账户场景：R2 账号 ID 与 API Token 均从环境变量读取
- *     （R2_ACCOUNT_ID / R2_API_TOKEN），Token 来自有该账号
- *     Account Analytics Read 权限的账户。GraphQL 请求头需手动带上
- *     Authorization: Bearer <R2_API_TOKEN>，SDK/绑定不会代填。
- */
-async function fetchR2Storage(env: Env): Promise<R2StorageStats> {
-  const totalBytes = parseCapacity(env.R2_TOTAL_CAPACITY);
-  const result = emptyR2Storage(totalBytes);
-
-  if (!env.R2_API_TOKEN || !env.R2_ACCOUNT_ID || !env.R2_BUCKET_NAME) {
-    result.error = 'missing_config';
-    return result;
-  }
-
-  const end = nowIso();
-  const start = isoDaysAgo(7);
-  const variables = {
-    accountTag: env.R2_ACCOUNT_ID,
-    startDate: start,
-    endDate: end,
-    bucketName: env.R2_BUCKET_NAME,
-  };
-
-  // 自定义标量 string / Time 必须用变量传，写成字面量会被拒（HTTP 400）。
-  // 时间字段文档是 datetime，若 schema 里不存在则回退旧版 date。
-  let lastError = 'no_analytics_data';
-  for (const timeField of ['datetime', 'date'] as const) {
-    try {
-      const query =
-        'query R2StorageUsage($accountTag: string!, $startDate: Time, $endDate: Time, $bucketName: string) {' +
-        '  viewer {' +
-        '    accounts(filter: { accountTag: $accountTag }) {' +
-        '      r2StorageAdaptiveGroups(' +
-        '        limit: 10000' +
-        '        filter: { ' + timeField + '_geq: $startDate, ' + timeField + '_leq: $endDate, bucketName: $bucketName }' +
-        '        orderBy: [' + timeField + '_DESC]' +
-        '      ) {' +
-        '        max { payloadSize objectCount }' +
-        '        dimensions { ' + timeField + ' }' +
-        '      }' +
-        '    }' +
-        '  }' +
-        '}';
-
-      const payload = await graphqlRequest(env, query, variables);
-      const groups = payload?.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups;
-      const latest = Array.isArray(groups) ? groups[0]?.max : undefined;
-      if (!latest) {
-        result.error = 'no_analytics_data';
-        return result;
-      }
-
-      result.usedBytes = num(latest.payloadSize);
-      result.objectCount = num(latest.objectCount);
-      result.usagePercent = usagePercent(result.usedBytes, result.totalBytes);
-      result.error = null;
-      return result;
-    } catch (error) {
-      lastError = errorMessage(error);
-    }
-  }
-
-  result.error = lastError;
-  return result;
-}
-
-/**
- * 5.2 R2 操作额度 —— Cloudflare GraphQL Analytics API（r2OperationsAdaptiveGroups）
- *
- *     按官方文档取本月累计、账号级的操作请求数，按 actionType 汇总后归入
- *     Class A / Class B / Free 三类，再与每月免费额度相减算余额。
- *     免费额度：Class A 1,000,000 / Class B 10,000,000（可用环境变量覆盖）。
- *     参考：https://developers.cloudflare.com/r2/platform/metrics-analytics/
- *           https://developers.cloudflare.com/r2/pricing/
- *
- *     这里刻意不按 bucketName 过滤：免费额度是按账号计的，按桶过滤会低估用量。
- *     参数必须用变量传：自定义标量 string / Time 不接受字面量。
- */
-async function fetchR2Operations(env: Env): Promise<R2OperationsStats> {
+async function fetchR2Usage(env: Env): Promise<R2UsageBundle> {
+  const totalFallback = parseCapacity(env.R2_TOTAL_CAPACITY);
   const limitA = parseCount(env.R2_CLASS_A_LIMIT, DEFAULT_R2_CLASS_A_LIMIT);
   const limitB = parseCount(env.R2_CLASS_B_LIMIT, DEFAULT_R2_CLASS_B_LIMIT);
-  const { start, end } = currentMonthRange();
-  const result = emptyOps();
-  result.periodStart = start;
-  result.periodEnd = end;
+  const url = env.R2_USAGE_API_URL || DEFAULT_R2_USAGE_API_URL;
 
-  if (!env.R2_API_TOKEN || !env.R2_ACCOUNT_ID) {
-    result.error = 'missing_config';
-    return result;
-  }
+  const storage = emptyR2Storage(totalFallback);
+  const operations = emptyOps();
+  const range = currentMonthRange();
+  operations.periodStart = range.start;
+  operations.periodEnd = range.end;
 
-  const variables = { accountTag: env.R2_ACCOUNT_ID, startDate: start, endDate: end };
-  let lastError = 'no_analytics_data';
+  try {
+    const response = await fetchWithTimeout(url, {
+      headers: { Accept: 'application/json', 'User-Agent': 'diskdash-worker/1.0' },
+    });
+    if (!response.ok) throw new Error('r2usage_http_' + response.status);
 
-  for (const timeField of ['datetime', 'date'] as const) {
-    try {
-      const query =
-        'query R2OperationsVolume($accountTag: string!, $startDate: Time, $endDate: Time) {' +
-        '  viewer {' +
-        '    accounts(filter: { accountTag: $accountTag }) {' +
-        '      r2OperationsAdaptiveGroups(' +
-        '        limit: 10000' +
-        '        filter: { ' + timeField + '_geq: $startDate, ' + timeField + '_leq: $endDate }' +
-        '      ) {' +
-        '        sum { requests }' +
-        '        dimensions { actionType }' +
-        '      }' +
-        '    }' +
-        '  }' +
-        '}';
+    const payload = (await response.json()) as {
+      month?: unknown;
+      fetchedAt?: unknown;
+      operations?: { classA?: unknown; classB?: unknown; total?: unknown; source?: unknown };
+      storage?: {
+        usedBytes?: unknown;
+        totalBytes?: unknown;
+        usagePercent?: unknown;
+        snapshotAt?: unknown;
+        source?: unknown;
+        bucketCount?: unknown;
+        buckets?: Array<{ name?: unknown; usedBytes?: unknown; objectCount?: unknown }>;
+      };
+    };
 
-      const payload = await graphqlRequest(env, query, variables);
-      const groups = payload?.data?.viewer?.accounts?.[0]?.r2OperationsAdaptiveGroups;
-      const list = Array.isArray(groups) ? groups : [];
-
-      let usedA = 0;
-      let usedB = 0;
-      let freeUsed = 0;
-      const byAction: R2OpAction[] = [];
-
-      for (const group of list) {
-        const action = String(group?.dimensions?.actionType ?? 'unknown');
-        const requests = num(group?.sum?.requests) ?? 0;
-        const opClass = classifyR2Action(action);
-        byAction.push({ action, requests, opClass });
-        if (opClass === 'A') usedA += requests;
-        else if (opClass === 'B') usedB += requests;
-        else if (opClass === 'free') freeUsed += requests;
-      }
-
-      byAction.sort((left, right) => right.requests - left.requests);
-      result.byAction = byAction;
-      result.classA = buildOpQuota(usedA, limitA);
-      result.classB = buildOpQuota(usedB, limitB);
-      result.freeRequests = freeUsed;
-      result.error = null;
-      return result;
-    } catch (error) {
-      lastError = errorMessage(error);
+    // ---- 存储容量（REST 逐桶实时统计）----
+    const usedBytes = num(payload.storage?.usedBytes);
+    const totalBytes = num(payload.storage?.totalBytes) ?? totalFallback;
+    storage.usedBytes = usedBytes;
+    storage.totalBytes = totalBytes;
+    storage.usagePercent = usagePercent(usedBytes, totalBytes);
+    if (storage.usagePercent === null) {
+      // 接口自带的百分比只在自己算不出来时兜底
+      storage.usagePercent = num(payload.storage?.usagePercent);
     }
-  }
+    if (usedBytes === null && totalBytes === null) storage.error = 'unexpected_payload';
 
-  result.error = lastError;
-  return result;
+    storage.snapshotAt = typeof payload.storage?.snapshotAt === 'string' ? payload.storage.snapshotAt : null;
+    storage.source = typeof payload.storage?.source === 'string' ? payload.storage.source : null;
+    storage.bucketCount = num(payload.storage?.bucketCount);
+
+    const rawBuckets = Array.isArray(payload.storage?.buckets) ? payload.storage.buckets : [];
+    storage.buckets = rawBuckets.map((bucket) => ({
+      name: String(bucket?.name ?? 'unknown'),
+      usedBytes: num(bucket?.usedBytes),
+      objectCount: num(bucket?.objectCount),
+    }));
+
+    // 顶层没有 objectCount，用逐桶明细求和补上
+    const objectCounts = storage.buckets
+      .map((bucket) => bucket.objectCount)
+      .filter((value): value is number => value !== null);
+    storage.objectCount = objectCounts.length > 0
+      ? objectCounts.reduce((sum, value) => sum + value, 0)
+      : null;
+
+    // ---- 操作额度（GraphQL，约 24h 延迟）----
+    const usedA = num(payload.operations?.classA) ?? 0;
+    const usedB = num(payload.operations?.classB) ?? 0;
+    operations.classA = buildOpQuota(usedA, limitA);
+    operations.classB = buildOpQuota(usedB, limitB);
+    operations.freeRequests = null;
+    operations.byAction = [];
+    operations.source = typeof payload.operations?.source === 'string' ? payload.operations.source : null;
+    if (typeof payload.month === 'string' && /^\d{4}-\d{2}$/.test(payload.month)) {
+      operations.periodStart = payload.month + '-01T00:00:00.000Z';
+      operations.periodEnd = typeof payload.fetchedAt === 'string' ? payload.fetchedAt : nowIso();
+    }
+
+    return { storage, operations };
+  } catch (error) {
+    const message = errorMessage(error);
+    storage.error = message;
+    operations.error = message;
+    return { storage, operations };
+  }
 }
 
 /**
@@ -637,17 +542,21 @@ async function fetchOpenlist(env: Env): Promise<OpenListStats> {
  * ========================================================================= */
 
 export async function collectAll(env: Env): Promise<StatsData> {
-  const [r2Storage, r2Operations, imghub, openlist] = await Promise.allSettled([
-    fetchR2Storage(env),
-    fetchR2Operations(env),
+  const [r2Usage, imghub, openlist] = await Promise.allSettled([
+    fetchR2Usage(env),
     fetchImghub(env),
     fetchOpenlist(env),
   ]);
 
+  const usage = settle(r2Usage, () => ({
+    storage: { ...emptyR2Storage(parseCapacity(env.R2_TOTAL_CAPACITY)), error: 'source_crashed' },
+    operations: { ...emptyOps(), error: 'source_crashed' },
+  }));
+
   return {
     updatedAt: nowIso(),
-    r2Storage: settle(r2Storage, () => ({ ...emptyR2Storage(parseCapacity(env.R2_TOTAL_CAPACITY)), error: 'source_crashed' })),
-    r2Operations: settle(r2Operations, () => ({ ...emptyOps(), error: 'source_crashed' })),
+    r2Storage: usage.storage,
+    r2Operations: usage.operations,
     imghub: settle(imghub, () => ({ ...emptyQuota(), error: 'source_crashed' })),
     openlist: settle(openlist, () => ({ mounts: [], error: 'source_crashed' })),
   };

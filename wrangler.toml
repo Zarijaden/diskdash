@@ -3,7 +3,6 @@
 #  DiskDash — Cloudflare Worker 配置
 #  部署前请把所有 YOUR_... 占位符替换为真实值。
 #  敏感信息（Token / Key）请勿写在本文件，使用：
-#    npx wrangler secret put R2_API_TOKEN
 #    npx wrangler secret put IMGHUB_API_KEY
 #    npx wrangler secret put OPENLIST_TOKEN
 # ============================================================================
@@ -37,16 +36,13 @@ preview_id = "YOUR_KV_PREVIEW_NAMESPACE_ID"
 ALLOWED_ORIGIN = "https://zarijaden.cc.cd,https://diskdash.pages.dev"
 
 # ---------------------------------------------------------------------------
-# 1) R2 存储容量（GraphQL Analytics API · 跨账户 API Token）
+# 1) R2 用量（自家用量接口，一次返回存储 + 操作）
 # ---------------------------------------------------------------------------
-# R2 所属的 Cloudflare 账号 ID（Account Tag），从环境变量读取
-R2_ACCOUNT_ID = "ca3c605461ab9e3e97d0de8392fb457a"
-# R2 存储桶名称
-R2_BUCKET_NAME = "bkr2"
-# R2 总配额（GraphQL 不返回配额，需自行预设）。支持 "100GB" / "1TB" / 纯字节数。
-# 留空则无法计算使用率，前端只显示已用量。
+# 用量接口地址
+R2_USAGE_API_URL = "https://r2usage.zpbk.cc.cd/api"
+# 兜底总配额：接口没返回 totalBytes 时用它算百分比。支持 "100GB" / 纯字节数。
 R2_TOTAL_CAPACITY = "10GB"
-# R2 操作每月免费额度（Class A 默认 100 万，Class B 默认 1000 万；可覆盖）
+# 每月免费额度（接口只给已用量，额度在这里配；Class A 默认 100 万，Class B 默认 1000 万）
 R2_CLASS_A_LIMIT = "1000000"
 R2_CLASS_B_LIMIT = "10000000"
 

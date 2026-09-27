@@ -288,7 +288,7 @@
   .bar-fill.na { background: rgba(255, 255, 255, 0.12); }
   .bar-fill.err { background: var(--error); }
 
-  /* ---------------- R2 操作明细 ---------------- */
+  /* ---------------- R2 桶明细 / 数据来源 ---------------- */
   .ops-block { display: flex; flex-direction: column; gap: 8px; }
   .subhead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
   .subhead-title {
@@ -299,6 +299,13 @@
     text-transform: uppercase;
   }
   .subhead-period { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; color: var(--muted-2); }
+  .data-note {
+    padding-top: 2px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--muted-2);
+  }
   .actions { display: flex; flex-direction: column; }
   .action-row {
     display: flex;
@@ -464,13 +471,15 @@
 
       <div class="bars" id="bars"></div>
 
-      <div class="ops-block">
+      <div class="ops-block" id="opsBlock">
         <div class="subhead">
-          <span class="subhead-title">R2 操作明细 / 本月</span>
+          <span class="subhead-title">R2 桶明细 / 实时</span>
           <span class="subhead-period" id="opsPeriod">--</span>
         </div>
         <div class="actions" id="opsActions"></div>
       </div>
+
+      <div class="data-note" id="dataNote">--</div>
     </section>
   </main>
 
@@ -702,32 +711,43 @@
     };
   }
 
-  function renderOpsActions(ops) {
+  function renderBuckets(storage) {
+    var block = document.getElementById('opsBlock');
     var el = document.getElementById('opsActions');
     var periodEl = document.getElementById('opsPeriod');
     if (!el) return;
 
-    if (periodEl) {
-      periodEl.textContent = ops && ops.periodStart
-        ? new Date(ops.periodStart).toLocaleDateString('zh-CN') + ' → NOW'
-        : '--';
-    }
-
-    var list = (ops && ops.byAction) || [];
-    if (!list.length) {
-      el.innerHTML = '<div class="action-empty">' +
-        (ops && ops.error ? 'OPS SOURCE ERROR' : 'NO OPS DATA') + '</div>';
+    var buckets = (storage && storage.buckets) || [];
+    if (!buckets.length) {
+      // 接口没给逐桶明细时整块隐藏
+      if (block) block.style.display = 'none';
       return;
     }
+    if (block) block.style.display = '';
 
-    el.innerHTML = list.map(function (item) {
-      var cls = String(item.opClass || 'other').toLowerCase();
+    if (periodEl) {
+      var when = storage.snapshotAt ? new Date(storage.snapshotAt) : null;
+      periodEl.textContent = buckets.length + ' BUCKETS · ' +
+        (when && !isNaN(when.getTime()) ? when.toLocaleString('zh-CN', { hour12: false }) : '--');
+    }
+
+    el.innerHTML = buckets.map(function (bucket) {
       return '<div class="action-row">' +
-        '<span class="chip ' + cls + '">' + escapeHtml(String(item.opClass || '?').toUpperCase()) + '</span>' +
-        '<span class="action-name">' + escapeHtml(item.action) + '</span>' +
-        '<span class="action-count">' + escapeHtml(formatNumber(item.requests) || '0') + '</span>' +
+        '<span class="action-name">' + escapeHtml(bucket.name) + '</span>' +
+        '<span class="action-count">' + escapeHtml(formatBytes(bucket.usedBytes) || '0 B') + '</span>' +
+        '<span class="action-count">' + escapeHtml(formatNumber(bucket.objectCount) || '0') + ' OBJ</span>' +
       '</div>';
     }).join('');
+  }
+
+  // 接口把存储（REST 实时）和操作数（GraphQL 约 24h 延迟）的来源都标出来了，直接展示
+  function renderDataNote(storage, ops) {
+    var el = document.getElementById('dataNote');
+    if (!el) return;
+    var storageSource = (storage && storage.source) || 'unknown';
+    var opsSource = (ops && ops.source) || 'unknown';
+    el.textContent = 'STORAGE: ' + String(storageSource).toUpperCase() + ' (实时)   ·   OPS: ' +
+      String(opsSource).toUpperCase() + ' (≈24H 延迟)';
   }
 
   /* ---------------- 渲染：总入口 ---------------- */
@@ -757,7 +777,8 @@
 
     renderMounts(data.openlist);
     renderBars(data);
-    renderOpsActions(ops);
+    renderBuckets(r2);
+    renderDataNote(r2, ops);
 
     var updated = data.updatedAt ? new Date(data.updatedAt) : null;
     document.getElementById('updatedAt').textContent = 'LAST SYNC: ' +
