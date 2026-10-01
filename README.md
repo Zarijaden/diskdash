@@ -24,7 +24,7 @@
 | 模块 | 获取方式 | 失败表现 |
 | --- | --- | --- |
 | R2 存储 + 操作额度 | `GET R2_USAGE_API_URL`：存储走 REST 逐桶实时统计，操作数走 GraphQL（约 24h 延迟） | R2 卡片显示 `DEGRADED` |
-| ImgHub / Infinicloud | `GET IMGHUB_API_BASE/api/manage/list?action=index-storage-stats`，取 `metadata.channelStats[IMGHUB_CHANNEL].usedMB`；总配额取该渠道 `quota.limitGB` | 显示 N/A |
+| ImgHub / Infinicloud | `GET IMGHUB_API_BASE/api/manage/list?count=-1&recursive=true&channelName=IMGHUB_CHANNEL`，累加 `metadata.FileSizeBytes` / `FileSize`；总配额取该渠道 `quota.limitGB` | 显示 N/A |
 | OpenList | `GET /api/admin/storage/list`，只取挂载点名 | 挂载区显示 source error |
 
 > R2 不再直连 Cloudflare GraphQL：用量由自家接口 `https://r2usage.zpbk.cc.cd/api` 提供，

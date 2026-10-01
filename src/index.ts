@@ -453,14 +453,17 @@ async function imghubError(label: string, response: Response): Promise<string> {
 }
 
 /**
- * 5.3 ImgHub / Infinicloud —— 走 ImgHub 管理 API 按渠道聚合，不再连 WebDAV。
+ * 5.3 ImgHub / Infinicloud —— 走 ImgHub 管理 API（/api/manage/list）按渠道聚合。
  *
- *     GET /api/manage/list?action=index-storage-stats
- *     -> metadata.channelStats = { infinicloud: { usedMB, fileCount }, ... }，单位 MB
- *
- *     读取前先打一次 count=-1&sum=true，让 ImgHub 合并挂起操作并重算 channelStats。
- *     已用容量取该渠道；总配额优先取渠道配置里的 quota.limitGB，取不到再退回
- *     INFINICLOUD_TOTAL_CAPACITY。所需 Secret：IMGHUB_API_KEY（list + manage 权限）。
+ *     文档 https://cfbed.sanyue.de/api/list.html：
+ *       GET /api/manage/list?count=-1&recursive=true&channelName=<渠道名>
+ *       -> { files: [{ name, metadata }], totalCount, ... }
+ *     两个坑（源码 functions/utils/indexManager.js readIndex）：
+ *       - count=-1 才返回全部；recursive=true 才带子目录里的文件，缺省会漏掉子目录。
+ *       - channelName 精确匹配 metadata.ChannelName（大小写敏感）。
+ *     大小取 metadata.FileSizeBytes（字节），否则 metadata.FileSize × 1MiB（ImgBed 存的是 MB）。
+ *     总配额优先取渠道配置的 quota.limitGB，取不到再退回 INFINICLOUD_TOTAL_CAPACITY。
+ *     所需 Secret：IMGHUB_API_KEY（list + manage 权限）。
  */
 export async function fetchImghub(env: Env): Promise<QuotaStats> {
   const result = emptyQuota();
@@ -472,39 +475,36 @@ export async function fetchImghub(env: Env): Promise<QuotaStats> {
   }
 
   const auth = { Authorization: 'Bearer ' + env.IMGHUB_API_KEY, Accept: 'application/json' };
-  const listUrl = (query: string) => base + '/api/manage/list?' + query;
 
   try {
-    // 触发一次索引合并，保证 channelStats 含最新上传；失败不阻断读取
-    try {
-      const warmup = await fetchWithTimeout(listUrl('count=-1&sum=true'), { headers: auth });
-      if (!warmup.ok) await imghubError('warmup', warmup);
-    } catch {
-      /* best-effort */
-    }
-
-    const statsResponse = await fetchWithTimeout(listUrl('action=index-storage-stats'), { headers: auth });
-    if (!statsResponse.ok) throw new Error(await imghubError('list', statsResponse));
-    const payload = (await statsResponse.json()) as {
-      metadata?: { channelStats?: Record<string, { usedMB?: unknown }> };
+    const url =
+      base + '/api/manage/list?count=-1&recursive=true&channelName=' + encodeURIComponent(channel);
+    const response = await fetchWithTimeout(url, { headers: auth });
+    if (!response.ok) throw new Error(await imghubError('list', response));
+    const payload = (await response.json()) as {
+      files?: Array<{ metadata?: Record<string, unknown> }>;
     };
-    const channelStats = payload.metadata?.channelStats;
-    const key = channelStats
-      ? Object.keys(channelStats).find((name) => name.toLowerCase() === channel.toLowerCase())
-      : undefined;
-    const usedMB = key && channelStats ? num(channelStats[key]?.usedMB) : null;
-    result.usedBytes = usedMB === null ? null : Math.round(usedMB * 1024 * 1024);
+    const files = Array.isArray(payload.files) ? payload.files : [];
+    result.usedBytes = files.reduce((sum, file) => sum + fileSizeBytes(file.metadata), 0);
 
     result.totalBytes = parseCapacity(env.INFINICLOUD_TOTAL_CAPACITY);
     if (result.totalBytes === null) result.totalBytes = await fetchImghubChannelCapacity(base, auth, channel);
 
     result.usagePercent = usagePercent(result.usedBytes, result.totalBytes);
-    if (result.usedBytes === null) result.error = 'channel_not_found';
     return result;
   } catch (error) {
     result.error = errorMessage(error);
     return result;
   }
+}
+
+/** metadata 里的大小：优先 FileSizeBytes（字节），否则 FileSize 按 MB 换算 */
+function fileSizeBytes(metadata: Record<string, unknown> | undefined): number {
+  if (!metadata) return 0;
+  const bytes = num(metadata['FileSizeBytes']);
+  if (bytes !== null) return bytes;
+  const mb = num(metadata['FileSize']);
+  return mb === null ? 0 : Math.round(mb * 1024 * 1024);
 }
 
 /** 读 ImgHub 渠道配置里的总配额（webdav.channels[].quota.limitGB）；读不到返回 null */

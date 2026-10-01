@@ -1,4 +1,4 @@
-// 最小回归检查：ImgHub 渠道容量解析（usedMB 是 MB，quota.limitGB 是 GB）
+// 最小回归检查：ImgHub 列表查询 -> 按渠道汇总字节（FileSize 是 MB，FileSizeBytes 是字节）
 import assert from 'node:assert/strict';
 import { fetchImghub } from '../src/index.ts';
 
@@ -10,12 +10,16 @@ const env = {
   IMGHUB_CHANNEL: 'infinicloud',
 };
 
+let listedUrl = '';
 globalThis.fetch = async (url) => {
   const u = String(url);
-  if (u.includes('sum=true')) return new Response('{}', { status: 200 });
-  if (u.includes('index-storage-stats')) {
+  if (u.includes('/api/manage/list')) {
+    listedUrl = u;
     return new Response(JSON.stringify({
-      metadata: { channelStats: { infinicloud: { usedMB: 1536, fileCount: 3 }, r2: { usedMB: 10, fileCount: 1 } } },
+      files: [
+        { name: '2024/a.jpg', metadata: { FileSize: 1024 } }, // 1024 MB
+        { name: 'b.jpg', metadata: { FileSizeBytes: 500 } },  // 500 B
+      ],
     }), { status: 200 });
   }
   if (u.includes('sysConfig/upload')) {
@@ -27,32 +31,17 @@ globalThis.fetch = async (url) => {
 };
 
 const out = await fetchImghub(env);
-assert.equal(out.usedBytes, 1536 * MB);
+assert.ok(listedUrl.includes('count=-1'), 'must request all files');
+assert.ok(listedUrl.includes('recursive=true'), 'must recurse into subdirectories');
+assert.ok(listedUrl.includes('channelName=infinicloud'), 'must filter by channel name');
+assert.equal(out.usedBytes, 1024 * MB + 500);
 assert.equal(out.totalBytes, 20 * GB);
-assert.equal(out.usagePercent, ((1536 * MB) / (20 * GB)) * 100);
+assert.equal(out.usagePercent, ((1024 * MB + 500) / (20 * GB)) * 100);
 assert.equal(out.error, null);
 
-// 渠道不存在时报 channel_not_found，且不抛异常
-globalThis.fetch = async (url) => {
-  const u = String(url);
-  if (u.includes('index-storage-stats')) {
-    return new Response(JSON.stringify({ metadata: { channelStats: {} } }), { status: 200 });
-  }
-  return new Response('{}', { status: 200 });
-};
-const missing = await fetchImghub(env);
-assert.equal(missing.usedBytes, null);
-assert.equal(missing.error, 'channel_not_found');
-
 // 上游 4xx：把 body 带进 error，便于在 KV / 日志里定位
-globalThis.fetch = async (url) => {
-  const u = String(url);
-  if (u.includes('index-storage-stats')) {
-    return new Response('{"error":"bad_request","message":"invalid action"}', { status: 400 });
-  }
-  return new Response('{}', { status: 200 });
-};
+globalThis.fetch = async () => new Response('{"error":"bad_request"}', { status: 400 });
 const failed = await fetchImghub(env);
-assert.equal(failed.error, 'imghub_list_400: {"error":"bad_request","message":"invalid action"}');
+assert.equal(failed.error, 'imghub_list_400: {"error":"bad_request"}');
 
 console.log('imghub ok');
