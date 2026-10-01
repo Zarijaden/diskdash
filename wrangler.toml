@@ -25,7 +25,7 @@ enabled = true
 [[kv_namespaces]]
 binding = "STATS_KV"
 id = "b4604705200f4a88b7cb09b9a1beb8ad"
-preview_id = "YOUR_KV_PREVIEW_NAMESPACE_ID"
+preview_id = "7e3f92715c0a4c8c989c988ed07a4f10"
 
 # ============================================================================
 #  非敏感配置（vars）
@@ -61,10 +61,23 @@ IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
 # ---------------------------------------------------------------------------
 # 3) OpenList
 # ---------------------------------------------------------------------------
-OPENLIST_BASE_URL = "https://cf.zpfl.cc.cd"
+OPENLIST_BASE_URL = "https://zpfl.cc.cd"
 # proxy = Worker 反向代理并注入 Token（默认）；redirect = 直接 302 到真实后台
 OPENLIST_PROXY_MODE = "proxy"
 
 [observability.logs]
 enabled = true
 invocation_logs = true
+
+[previews.vars]
+ALLOWED_ORIGIN = "https://zarijaden.cc.cd,https://diskdash.pages.dev"
+IMGHUB_API_BASE = "https://zpbk.cc.cd"
+IMGHUB_CHANNEL = "infinicloud"
+IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
+INFINICLOUD_TOTAL_CAPACITY = ""
+OPENLIST_BASE_URL = "https://zpfl.cc.cd"
+OPENLIST_PROXY_MODE = "proxy"
+R2_CLASS_A_LIMIT = "1000000"
+R2_CLASS_B_LIMIT = "10000000"
+R2_TOTAL_CAPACITY = "10GB"
+R2_USAGE_API_URL = "https://r2usage.zpbk.cc.cd/api"

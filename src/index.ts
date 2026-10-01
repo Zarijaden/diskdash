@@ -836,6 +836,43 @@ async function handleProxy(
   }
 }
 
+/**
+ * 临时诊断路由：GET /api/debug/fetch-test
+ * 对比 Worker -> zpbk.cc.cd 与 Worker -> httpbin.org 的 fetch 结果（状态码 + 完整响应头）。
+ * 目的是判断 400 是平台层拦的、还是目标站的问题。用完删掉。
+ */
+async function handleDebugFetchTest(env: Env): Promise<Response> {
+  const auth: Record<string, string> = {
+    Authorization: 'Bearer ' + (env.IMGHUB_API_KEY || ''),
+    Accept: '*/*',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  };
+
+  async function probe(name: string, url: string, headers: Record<string, string>) {
+    try {
+      const resp = await fetch(url, { headers });
+      const out: Record<string, string> = {};
+      resp.headers.forEach((value, key) => {
+        out[key] = value;
+      });
+      const body = (await resp.text()).slice(0, 200);
+      console.error('[debug] ' + name + ':', resp.status, JSON.stringify(out), body);
+      return { url, status: resp.status, headers: out, body };
+    } catch (error) {
+      const detail = errorMessage(error);
+      console.error('[debug] ' + name + ' threw:', detail);
+      return { url, error: detail };
+    }
+  }
+
+  return jsonResponse({
+    zpbk: await probe('zpbk', 'https://zpbk.cc.cd/api/manage/list?count=-1', auth),
+    // 对照组：不带任何密钥，只验证 Worker 出口能不能正常 fetch 公网
+    httpbin: await probe('httpbin', 'https://httpbin.org/get', { Accept: '*/*' }),
+  });
+}
+
 /* ===========================================================================
  * 8. 入口
  * ========================================================================= */
@@ -867,6 +904,9 @@ export default {
     }
     if (url.pathname === '/api/proxy/imghub' && request.method === 'GET') {
       return handleProxy('imghub', request, env);
+    }
+    if (url.pathname === '/api/debug/fetch-test' && request.method === 'GET') {
+      return handleDebugFetchTest(env);
     }
     if (url.pathname === '/api/health') {
       return jsonResponse({ ok: true, time: nowIso() }, 200, corsHeaders(origin, env));
