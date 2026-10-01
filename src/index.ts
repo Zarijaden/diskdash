@@ -452,16 +452,68 @@ async function imghubError(label: string, response: Response): Promise<string> {
   return 'imghub_' + label + '_' + response.status + (detail ? ': ' + detail : '');
 }
 
+/** 递归遍历的最大层数（根目录算第 0 层） */
+const IMGHUB_MAX_DEPTH = 5;
+
+interface ImghubFile {
+  metadata?: Record<string, unknown>;
+}
+
+interface ImghubCrawl {
+  files: ImghubFile[];
+  requests: number;
+}
+
+/**
+ * 递归拉取一个目录下的全部文件：
+ *   GET /api/manage/list?count=-1&dir=<dir>
+ * files[] 收进 crawl.files；再对 directories[] 里每个子目录递归，最多 IMGHUB_MAX_DEPTH 层。
+ */
+async function collectFiles(
+  base: string,
+  auth: Record<string, string>,
+  dir = '',
+  depth = 0,
+  crawl: ImghubCrawl = { files: [], requests: 0 },
+): Promise<ImghubCrawl> {
+  const url = base + '/api/manage/list?count=-1&dir=' + encodeURIComponent(dir);
+  crawl.requests++;
+  const response = await fetchWithTimeout(url, { headers: auth });
+  const text = await response.text();
+  console.error(
+    '[imghub] #' + crawl.requests + ' GET ' + url + ' -> ' + response.status + ' body.head=' + text.slice(0, 200),
+  );
+  if (!response.ok) throw new Error('imghub_' + response.status + ': ' + text.slice(0, 300));
+
+  const payload = JSON.parse(text) as { files?: ImghubFile[]; directories?: unknown[] };
+  if (Array.isArray(payload.files)) crawl.files.push(...payload.files);
+
+  const subdirs = (Array.isArray(payload.directories) ? payload.directories : [])
+    .map((item) => String(item))
+    .filter(Boolean);
+  if (subdirs.length === 0) return crawl;
+
+  if (depth >= IMGHUB_MAX_DEPTH) {
+    console.error(
+      '[imghub] depth ' + depth + ' >= ' + IMGHUB_MAX_DEPTH + ' at "' + dir + '", skip ' + subdirs.length + ' subdir(s)',
+    );
+    return crawl;
+  }
+  for (const subdir of subdirs) {
+    await collectFiles(base, auth, subdir, depth + 1, crawl);
+  }
+  return crawl;
+}
+
 /**
  * 5.3 ImgHub / Infinicloud —— 走 ImgHub 管理 API（/api/manage/list）按渠道聚合。
  *
  *     文档 https://cfbed.sanyue.de/api/list.html：
- *       GET /api/manage/list?count=-1&recursive=true&channelName=<渠道名>
- *       -> { files: [{ name, metadata }], totalCount, ... }
- *     两个坑（源码 functions/utils/indexManager.js readIndex）：
- *       - count=-1 才返回全部；recursive=true 才带子目录里的文件，缺省会漏掉子目录。
- *       - channelName 精确匹配 metadata.ChannelName（大小写敏感）。
- *     大小取 metadata.FileSizeBytes（字节），否则 metadata.FileSize × 1MiB（ImgBed 存的是 MB）。
+ *       GET /api/manage/list?count=-1&dir=<目录>
+ *       -> { files: [{ name, metadata }], directories: [子目录], totalCount, ... }
+ *     源码 readIndex 只在 recursive=true 时返回子目录文件；这里改成自己按 directories[]
+ *     递归（见 collectFiles），最多 IMGHUB_MAX_DEPTH 层，避免大目录树一次拉爆。
+ *     再按 metadata.ChannelName（大小写不敏感）过滤，累加 metadata.FileSizeBytes。
  *     总配额优先取渠道配置的 quota.limitGB，取不到再退回 INFINICLOUD_TOTAL_CAPACITY。
  *     所需 Secret：IMGHUB_API_KEY（list + manage 权限）。
  */
@@ -474,8 +526,7 @@ export async function fetchImghub(env: Env): Promise<QuotaStats> {
     return result;
   }
 
-  // Header 照抄 Termux 上验证通过的 curl：带浏览器 UA、Accept 用 */*，
-  // 之前 Worker 的 fetch 不带 UA，被 zpbk.cc.cd 前面的 WAF 当成裸请求报了 400
+  // Header 照抄 Termux 上验证通过的 curl：带浏览器 UA、Accept 用 */*
   const auth = {
     Authorization: 'Bearer ' + env.IMGHUB_API_KEY,
     Accept: '*/*',
@@ -484,20 +535,23 @@ export async function fetchImghub(env: Env): Promise<QuotaStats> {
   };
 
   try {
-    const url =
-      base + '/api/manage/list?count=-1&recursive=true&channelName=' + encodeURIComponent(channel);
-    const response = await fetchWithTimeout(url, { headers: auth });
-    if (!response.ok) throw new Error(await imghubError('list', response));
-    const payload = (await response.json()) as {
-      files?: Array<{ metadata?: Record<string, unknown> }>;
-    };
-    const files = Array.isArray(payload.files) ? payload.files : [];
-    result.usedBytes = files.reduce((sum, file) => sum + fileSizeBytes(file.metadata), 0);
+    const crawl = await collectFiles(base, auth, '');
+    const matched = crawl.files.filter(
+      (file) => String(file.metadata?.ChannelName ?? '').toLowerCase() === channel.toLowerCase(),
+    );
+    result.usedBytes = matched.reduce((sum, file) => sum + fileSizeBytes(file.metadata), 0);
 
     result.totalBytes = parseCapacity(env.INFINICLOUD_TOTAL_CAPACITY);
-    if (result.totalBytes === null) result.totalBytes = await fetchImghubChannelCapacity(base, auth, channel);
-
+    let urls = crawl.requests;
+    if (result.totalBytes === null) {
+      result.totalBytes = await fetchImghubChannelCapacity(base, auth, channel);
+      urls++;
+    }
     result.usagePercent = usagePercent(result.usedBytes, result.totalBytes);
+    console.error(
+      '[imghub] done: urls=' + urls + ' files=' + crawl.files.length + ' matched=' + matched.length +
+        ' usedBytes=' + result.usedBytes + ' totalBytes=' + result.totalBytes,
+    );
     return result;
   } catch (error) {
     result.error = errorMessage(error);
