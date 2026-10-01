@@ -440,6 +440,18 @@ function imghubBase(env: Env): string | null {
   }
 }
 
+/** 读出错响应的 body（截断成一行）并打日志，同时把它拼进 error，便于在 KV / wrangler tail 定位 4xx */
+async function imghubError(label: string, response: Response): Promise<string> {
+  let detail = '';
+  try {
+    detail = (await response.text()).replace(/\s+/g, ' ').trim().slice(0, 300);
+  } catch {
+    /* body 读不出来就算了 */
+  }
+  console.error('[imghub] ' + label + ' HTTP ' + response.status + (detail ? ' body=' + detail : ''));
+  return 'imghub_' + label + '_' + response.status + (detail ? ': ' + detail : '');
+}
+
 /**
  * 5.3 ImgHub / Infinicloud —— 走 ImgHub 管理 API 按渠道聚合，不再连 WebDAV。
  *
@@ -465,13 +477,14 @@ export async function fetchImghub(env: Env): Promise<QuotaStats> {
   try {
     // 触发一次索引合并，保证 channelStats 含最新上传；失败不阻断读取
     try {
-      await fetchWithTimeout(listUrl('count=-1&sum=true'), { headers: auth });
+      const warmup = await fetchWithTimeout(listUrl('count=-1&sum=true'), { headers: auth });
+      if (!warmup.ok) await imghubError('warmup', warmup);
     } catch {
       /* best-effort */
     }
 
     const statsResponse = await fetchWithTimeout(listUrl('action=index-storage-stats'), { headers: auth });
-    if (!statsResponse.ok) throw new Error('imghub_http_' + statsResponse.status);
+    if (!statsResponse.ok) throw new Error(await imghubError('list', statsResponse));
     const payload = (await statsResponse.json()) as {
       metadata?: { channelStats?: Record<string, { usedMB?: unknown }> };
     };
@@ -502,7 +515,10 @@ async function fetchImghubChannelCapacity(
 ): Promise<number | null> {
   try {
     const response = await fetchWithTimeout(base + '/api/manage/sysConfig/upload', { headers: auth });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      await imghubError('capacity', response);
+      return null;
+    }
     const payload = (await response.json()) as {
       webdav?: { channels?: Array<{ name?: unknown; quota?: { limitGB?: unknown } }> };
     };

@@ -44,4 +44,15 @@ const missing = await fetchImghub(env);
 assert.equal(missing.usedBytes, null);
 assert.equal(missing.error, 'channel_not_found');
 
+// 上游 4xx：把 body 带进 error，便于在 KV / 日志里定位
+globalThis.fetch = async (url) => {
+  const u = String(url);
+  if (u.includes('index-storage-stats')) {
+    return new Response('{"error":"bad_request","message":"invalid action"}', { status: 400 });
+  }
+  return new Response('{}', { status: 200 });
+};
+const failed = await fetchImghub(env);
+assert.equal(failed.error, 'imghub_list_400: {"error":"bad_request","message":"invalid action"}');
+
 console.log('imghub ok');
