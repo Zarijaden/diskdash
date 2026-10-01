@@ -47,10 +47,14 @@ R2_CLASS_A_LIMIT = "1000000"
 R2_CLASS_B_LIMIT = "10000000"
 
 # ---------------------------------------------------------------------------
-# 2) ImgHub / Infinicloud (WebDAV) —— 二者是同一个 WebDAV，不分开
+# 2) ImgHub / Infinicloud —— 走 ImgHub 管理 API，按渠道读已用容量
 # ---------------------------------------------------------------------------
-# WebDAV 根地址（InfiniCLOUD / TeraCloud 的 WebDAV 端点），用于 PROPFIND 探测配额
-IMGHUB_WEBDAV_URL = "https://aki.teracloud.jp/dav/"
+# ImgHub 实例根地址（管理 API 基址）
+IMGHUB_API_BASE = "https://zpbk.cc.cd"
+# InfiniCLOUD 在图床里的渠道名（ChannelName），对应 metadata.channelStats 的 key
+IMGHUB_CHANNEL = "infinicloud"
+# 兜底总配额：ImgHub 渠道未配置 quota.limitGB 时使用，支持 "20GB" / 字节数；留空则只显示已用
+INFINICLOUD_TOTAL_CAPACITY = ""
 # ImgHub 后台地址，/api/proxy/imghub 代理跳转的目标
 IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
 

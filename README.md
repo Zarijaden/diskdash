@@ -24,7 +24,7 @@
 | 模块 | 获取方式 | 失败表现 |
 | --- | --- | --- |
 | R2 存储 + 操作额度 | `GET R2_USAGE_API_URL`：存储走 REST 逐桶实时统计，操作数走 GraphQL（约 24h 延迟） | R2 卡片显示 `DEGRADED` |
-| ImgHub / Infinicloud | 二者是同一个 WebDAV：`PROPFIND` 读取 `quota-used-bytes` / `quota-available-bytes` | 显示 N/A |
+| ImgHub / Infinicloud | `GET IMGHUB_API_BASE/api/manage/list?action=index-storage-stats`，取 `metadata.channelStats[IMGHUB_CHANNEL].usedMB`；总配额取该渠道 `quota.limitGB` | 显示 N/A |
 | OpenList | `GET /api/admin/storage/list`，只取挂载点名 | 挂载区显示 source error |
 
 > R2 不再直连 Cloudflare GraphQL：用量由自家接口 `https://r2usage.zpbk.cc.cd/api` 提供，
@@ -45,7 +45,7 @@
 
 ### 3. 写入密钥（不要写进 wrangler.toml）
 
-    npx wrangler secret put IMGHUB_API_KEY
+    npx wrangler secret put IMGHUB_API_KEY   # ImgHub API Token，需 list + manage 权限
     npx wrangler secret put OPENLIST_TOKEN
 
 ### 4. 修改 wrangler.toml 里的占位符
@@ -54,7 +54,7 @@
 
 - `ALLOWED_ORIGIN`：你的 Pages 域名（可多个，逗号分隔）
 - `R2_USAGE_API_URL` / `R2_TOTAL_CAPACITY` / `R2_CLASS_A_LIMIT` / `R2_CLASS_B_LIMIT`
-- `IMGHUB_WEBDAV_URL` / `IMGHUB_PROXY_URL`
+- `IMGHUB_API_BASE` / `IMGHUB_CHANNEL` / `INFINICLOUD_TOTAL_CAPACITY` / `IMGHUB_PROXY_URL`
 - `OPENLIST_BASE_URL`
 
 ### 5. 部署 Worker

@@ -34,8 +34,14 @@ export interface Env {
   /** 每月免费额度：Class B，默认 10000000 */
   R2_CLASS_B_LIMIT?: string;
 
-  /* ---- ImgHub / Infinicloud（同一套 WebDAV）---- */
-  IMGHUB_WEBDAV_URL?: string;
+  /* ---- ImgHub / Infinicloud（走 ImgHub 管理 API，按渠道聚合）---- */
+  /** ImgHub 实例根地址，例如 https://zpbk.cc.cd；缺省时取 IMGHUB_PROXY_URL 的 origin */
+  IMGHUB_API_BASE?: string;
+  /** ImgHub 里承载 InfiniCLOUD 的渠道名（ChannelName），默认 infinicloud */
+  IMGHUB_CHANNEL?: string;
+  /** 兜底总配额：ImgHub 渠道未配置 quota 时使用，支持 "20GB" / 纯字节数 */
+  INFINICLOUD_TOTAL_CAPACITY?: string;
+  /** ImgHub 后台地址，/api/proxy/imghub 代理跳转的目标 */
   IMGHUB_PROXY_URL?: string;
 
   /* ---- OpenList ---- */
@@ -219,13 +225,6 @@ function buildOpQuota(used: number, limit: number): R2OpQuota {
 function currentMonthRange(now: Date = new Date()): { start: string; end: string } {
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   return { start: start.toISOString(), end: now.toISOString() };
-}
-
-/** 读取 WebDAV XML 中的数字属性（例如 quota-used-bytes），避免引入 XML 解析库 */
-function readXmlNumber(xml: string, tag: string): number | null {
-  const pattern = new RegExp('<' + '[^>]*' + tag + '[^>]*>' + '([^<]*)' + '<', 'i');
-  const matched = pattern.exec(xml);
-  return matched ? num(matched[1].trim()) : null;
 }
 
 /** 带超时的 fetch */
@@ -430,59 +429,90 @@ async function fetchR2Usage(env: Env): Promise<R2UsageBundle> {
   }
 }
 
+/** ImgHub 管理 API 根地址：优先 IMGHUB_API_BASE，缺省取 IMGHUB_PROXY_URL 的 origin */
+function imghubBase(env: Env): string | null {
+  const raw = (env.IMGHUB_API_BASE || env.IMGHUB_PROXY_URL || '').trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * 5.3 ImgHub / Infinicloud (WebDAV) —— Infinicloud 就是同一套 WebDAV，合并为一个模块
- *     用 PROPFIND 读取 quota-used-bytes / quota-available-bytes 得到配额。
- *     实测（aki.teracloud.jp）：DAV 头为 "1, 2"，未声明 RFC 4331 的 quota 标记，
- *     两个配额属性均返回 404，allprop 也不含任何配额属性 —— 该 WebDAV 拿不到容量，
- *     此时返回 error = 'quota_property_not_supported'，前端显示「WEBDAV 无配额信息」。
- *     若要总配额，需改用 InfiniCLOUD REST API V2（X-TeraCLOUD-API-KEY）。
- *     所需 Secret：IMGHUB_API_KEY
- *     注意：不同服务端鉴权方式不同，若使用 Basic Auth，请改为
- *     'Basic ' + btoa(env.IMGHUB_USER + ':' + env.IMGHUB_API_KEY)
+ * 5.3 ImgHub / Infinicloud —— 走 ImgHub 管理 API 按渠道聚合，不再连 WebDAV。
+ *
+ *     GET /api/manage/list?action=index-storage-stats
+ *     -> metadata.channelStats = { infinicloud: { usedMB, fileCount }, ... }，单位 MB
+ *
+ *     读取前先打一次 count=-1&sum=true，让 ImgHub 合并挂起操作并重算 channelStats。
+ *     已用容量取该渠道；总配额优先取渠道配置里的 quota.limitGB，取不到再退回
+ *     INFINICLOUD_TOTAL_CAPACITY。所需 Secret：IMGHUB_API_KEY（list + manage 权限）。
  */
-async function fetchImghub(env: Env): Promise<QuotaStats> {
+export async function fetchImghub(env: Env): Promise<QuotaStats> {
   const result = emptyQuota();
-  const url = env.IMGHUB_WEBDAV_URL;
-  if (!url) {
+  const base = imghubBase(env);
+  const channel = (env.IMGHUB_CHANNEL || 'infinicloud').trim();
+  if (!base || !env.IMGHUB_API_KEY) {
     result.error = 'missing_config';
     return result;
   }
 
+  const auth = { Authorization: 'Bearer ' + env.IMGHUB_API_KEY, Accept: 'application/json' };
+  const listUrl = (query: string) => base + '/api/manage/list?' + query;
+
   try {
-    const headers: Record<string, string> = {
-      Depth: '0',
-      'Content-Type': 'application/xml; charset=utf-8',
-    };
-    if (env.IMGHUB_API_KEY) headers.Authorization = 'Bearer ' + env.IMGHUB_API_KEY;
-
-    const response = await fetchWithTimeout(url, {
-      method: 'PROPFIND',
-      headers,
-      body:
-        '<?xml version="1.0" encoding="utf-8"?>' +
-        '<d:propfind xmlns:d="DAV:"><d:prop>' +
-        '<d:quota-used-bytes/><d:quota-available-bytes/>' +
-        '</d:prop></d:propfind>',
-    });
-
-    if (!response.ok && response.status !== 207) {
-      throw new Error('webdav_http_' + response.status);
+    // 触发一次索引合并，保证 channelStats 含最新上传；失败不阻断读取
+    try {
+      await fetchWithTimeout(listUrl('count=-1&sum=true'), { headers: auth });
+    } catch {
+      /* best-effort */
     }
 
-    const xml = await response.text();
-    const used = readXmlNumber(xml, 'quota-used-bytes');
-    const available = readXmlNumber(xml, 'quota-available-bytes');
+    const statsResponse = await fetchWithTimeout(listUrl('action=index-storage-stats'), { headers: auth });
+    if (!statsResponse.ok) throw new Error('imghub_http_' + statsResponse.status);
+    const payload = (await statsResponse.json()) as {
+      metadata?: { channelStats?: Record<string, { usedMB?: unknown }> };
+    };
+    const channelStats = payload.metadata?.channelStats;
+    const key = channelStats
+      ? Object.keys(channelStats).find((name) => name.toLowerCase() === channel.toLowerCase())
+      : undefined;
+    const usedMB = key && channelStats ? num(channelStats[key]?.usedMB) : null;
+    result.usedBytes = usedMB === null ? null : Math.round(usedMB * 1024 * 1024);
 
-    result.usedBytes = used;
-    result.totalBytes = used !== null && available !== null && available >= 0 ? used + available : null;
+    result.totalBytes = parseCapacity(env.INFINICLOUD_TOTAL_CAPACITY);
+    if (result.totalBytes === null) result.totalBytes = await fetchImghubChannelCapacity(base, auth, channel);
+
     result.usagePercent = usagePercent(result.usedBytes, result.totalBytes);
-
-    if (used === null && available === null) result.error = 'quota_property_not_supported';
+    if (result.usedBytes === null) result.error = 'channel_not_found';
     return result;
   } catch (error) {
     result.error = errorMessage(error);
     return result;
+  }
+}
+
+/** 读 ImgHub 渠道配置里的总配额（webdav.channels[].quota.limitGB）；读不到返回 null */
+async function fetchImghubChannelCapacity(
+  base: string,
+  auth: Record<string, string>,
+  channel: string,
+): Promise<number | null> {
+  try {
+    const response = await fetchWithTimeout(base + '/api/manage/sysConfig/upload', { headers: auth });
+    if (!response.ok) return null;
+    const payload = (await response.json()) as {
+      webdav?: { channels?: Array<{ name?: unknown; quota?: { limitGB?: unknown } }> };
+    };
+    const match = (payload.webdav?.channels || []).find(
+      (item) => String(item?.name ?? '').toLowerCase() === channel.toLowerCase(),
+    );
+    const limitGB = num(match?.quota?.limitGB);
+    return limitGB !== null && limitGB > 0 ? Math.round(limitGB * 1024 * 1024 * 1024) : null;
+  } catch {
+    return null;
   }
 }
 

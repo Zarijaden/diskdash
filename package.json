@@ -10,6 +10,7 @@
     "build": "wrangler deploy --dry-run --outdir dist",
     "tail": "wrangler tail",
     "typecheck": "tsc --noEmit",
+    "test": "node test/imghub.test.mjs",
     "kv:create": "wrangler kv namespace create STATS_KV"
   },
   "devDependencies": {

@@ -534,7 +534,7 @@
     { key: 'r2Storage', label: 'R2 存储容量', type: 'quota' },
     { key: 'r2OpsClassA', label: 'R2 CLASS A 操作（本月）', type: 'ops' },
     { key: 'r2OpsClassB', label: 'R2 CLASS B 操作（本月）', type: 'ops' },
-    { key: 'imghub', label: 'IMG HUB / INFINICLOUD (WEBDAV)', type: 'quota' }
+    { key: 'imghub', label: 'IMG HUB / INFINICLOUD', type: 'quota' }
   ];
 
   /* ---------------- 工具函数 ---------------- */
@@ -656,11 +656,7 @@
     var hasTotal = stat.totalBytes !== null && stat.totalBytes !== undefined;
 
     if (!hasUsage && !hasTotal) {
-      // 实测 InfiniCLOUD/TeraCloud 的 WebDAV 不返回 RFC 4331 配额属性，
-      // 这属于「服务不支持」而不是读取失败，单独区分显示。
-      var label = stat.error === 'quota_property_not_supported'
-        ? 'WEBDAV 无配额信息'
-        : (stat.error ? '读取失败' : 'N/A');
+      var label = stat.error ? '读取失败' : 'N/A';
       return {
         text: '<span class="muted">' + label + '</span>',
         pct: 0,
