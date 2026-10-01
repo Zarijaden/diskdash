@@ -51,10 +51,12 @@ const out = await fetchImghub(env);
 assert.equal(listUrls.length, 3, 'one request per directory');
 for (const u of listUrls) {
   assert.ok(u.includes('count=-1'));
-  assert.ok(u.includes('dir='));
   assert.ok(!u.includes('recursive'), 'must not use recursive');
   assert.ok(!u.includes('channelName'), 'must not use channelName');
 }
+assert.ok(!listUrls[0].includes('dir='), 'root request omits empty dir');
+assert.ok(listUrls[1].includes('dir=new'));
+assert.ok(listUrls[2].includes('dir=new%2Fdeep'));
 assert.equal(out.usedBytes, 148502 + 4254218 + 1 * MB);
 assert.equal(out.totalBytes, 20 * GB);
 assert.equal(out.error, null);

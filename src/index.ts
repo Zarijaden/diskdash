@@ -476,12 +476,21 @@ async function collectFiles(
   depth = 0,
   crawl: ImghubCrawl = { files: [], requests: 0 },
 ): Promise<ImghubCrawl> {
-  const url = base + '/api/manage/list?count=-1&dir=' + encodeURIComponent(dir);
+  // 根目录不带 dir 参数，跟 Termux 上验证通过的请求保持一致（空 dir= 可能被前置层直接拒掉）
+  const url = base + '/api/manage/list?count=-1' + (dir ? '&dir=' + encodeURIComponent(dir) : '');
   crawl.requests++;
-  const response = await fetchWithTimeout(url, { headers: auth });
+  // redirect 手动处理：若前置层是 Cloudflare Access，这里能看到 302 + location
+  const response = await fetchWithTimeout(url, { headers: auth, redirect: 'manual' });
   const text = await response.text();
+  const headers = response.headers;
   console.error(
-    '[imghub] #' + crawl.requests + ' GET ' + url + ' -> ' + response.status + ' body.head=' + text.slice(0, 200),
+    '[imghub] #' + crawl.requests + ' GET ' + url + ' -> ' + response.status +
+      ' server=' + (headers.get('server') || '-') +
+      ' cf-ray=' + (headers.get('cf-ray') || '-') +
+      ' cf-mitigated=' + (headers.get('cf-mitigated') || '-') +
+      ' content-type=' + (headers.get('content-type') || '-') +
+      ' location=' + (headers.get('location') || '-') +
+      ' body.head=' + text.slice(0, 200),
   );
   if (!response.ok) throw new Error('imghub_' + response.status + ': ' + text.slice(0, 300));
 
