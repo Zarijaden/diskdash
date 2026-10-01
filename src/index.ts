@@ -474,7 +474,14 @@ export async function fetchImghub(env: Env): Promise<QuotaStats> {
     return result;
   }
 
-  const auth = { Authorization: 'Bearer ' + env.IMGHUB_API_KEY, Accept: 'application/json' };
+  // Header 照抄 Termux 上验证通过的 curl：带浏览器 UA、Accept 用 */*，
+  // 之前 Worker 的 fetch 不带 UA，被 zpbk.cc.cd 前面的 WAF 当成裸请求报了 400
+  const auth = {
+    Authorization: 'Bearer ' + env.IMGHUB_API_KEY,
+    Accept: '*/*',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  };
 
   try {
     const url =
