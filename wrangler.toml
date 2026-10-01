@@ -57,6 +57,6 @@ IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
 # ---------------------------------------------------------------------------
 # 3) OpenList
 # ---------------------------------------------------------------------------
-OPENLIST_BASE_URL = "https://YOUR_OPENLIST_HOST"
+OPENLIST_BASE_URL = "https://cf.zpfl.cc.cd"
 # proxy = Worker 反向代理并注入 Token（默认）；redirect = 直接 302 到真实后台
 OPENLIST_PROXY_MODE = "proxy"
