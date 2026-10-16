@@ -646,6 +646,7 @@
 
     Array.prototype.forEach.call(gridEl.querySelectorAll('.mount'), function (node, index) {
       var mount = mounts[index] || {};
+      // path 优先用接口给的挂载路径；旧快照的 name 本身就是 mount_path（如 /s3），可平滑兜底
       var target = mountUrl(openlist && openlist.base, mount.path || mount.name);
 
       node.setAttribute('role', 'link');
@@ -654,7 +655,7 @@
 
       function go() {
         if (!target) {
-          showToast('跳转地址不可用：后台缺少站点源', true);
+          showToast('后台缺少站点源：OPENLIST_BASE_URL 未配置或格式不对', true);
           return;
         }
         // 直接跳到该挂载点自己的路径，例如 https://host/s3
@@ -668,6 +669,20 @@
           go();
         }
       });
+    });
+  }
+
+  /**
+   * 快照结构是否过期：老版本 Worker 写的 KV 里 openlist 没有 base，
+   * 挂载点也没有 path。命中这种数据时前端主动重试一次，不用干等缓存过期。
+   */
+  function snapshotStale(data) {
+    var openlist = data && data.openlist;
+    if (!openlist) return false;
+    if (!('base' in openlist)) return true;
+    var mounts = openlist.mounts || [];
+    return mounts.some(function (mount) {
+      return mount && !('path' in mount);
     });
   }
 
@@ -826,16 +841,26 @@
   }
 
   /* ---------------- 数据获取 ---------------- */
+  function fetchStats(fresh) {
+    return fetch(api('/api/stats') + (fresh ? '?fresh=1' : ''), { cache: 'no-store' })
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.json();
+      })
+      .then(function (data) {
+        // 拿到老结构的快照（例如刚部署、边缘缓存还没过期）就立刻重试一次，
+        // 带上 fresh=1 让 Worker 跳过缓存，必要时顺手重抓一遍。
+        if (!fresh && snapshotStale(data)) return fetchStats(true);
+        return data;
+      });
+  }
+
   function load() {
     setSyncState('LOADING');
     // 用 Promise 包一层，让 api() 抛出的配置错误也能被下面的 .catch 捕获
     return Promise.resolve()
       .then(function () {
-        return fetch(api('/api/stats'), { cache: 'no-store' });
-      })
-      .then(function (response) {
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        return response.json();
+        return fetchStats(false);
       })
       .then(function (data) {
         render(data);

@@ -80,7 +80,7 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/stats` | 边缘缓存 5 分钟，未命中读 KV |
+| GET | `/api/stats` | 边缘缓存 5 分钟，未命中读 KV；`?fresh=1` 跳过边缘缓存 |
 | POST | `/api/refresh` | 手动刷新，KV 记录 `last_refresh_time`，5 分钟冷却（超限返回 429 + `Retry-After`）|
 | GET | `/api/proxy/openlist` | 注入 `OPENLIST_TOKEN` 反向代理 |
 | GET | `/api/proxy/imghub` | 注入 `IMGHUB_API_KEY` 反向代理 |
@@ -101,6 +101,15 @@
 
 > `/api/proxy/openlist` 仍在，但挂载矩阵已不再使用它。纯静态前端不需要它——因为跳转是
 > 浏览器直接访问 OpenList 站点，后台自己会处理登录态。
+
+### 快照形状自愈
+
+KV 里存的是上次抓取的 JSON。改动 `StatsData` 的形状（例如这次给 `openlist` 加 `base`、
+给挂载点加 `path`）之后，旧快照会一直被当成有效数据发出去，前端不会自动恢复。为此加了两道保险：
+
+- Worker：`snapshotUpToDate()` 判断关键 key 是否存在，缺 key 就当场重抓一次并覆盖 KV
+  （判断的是 key 存不存在，不是值是否为 null，所以没配 `OPENLIST_BASE_URL` 时不会反复重抓）；
+- 前端：拿到老结构快照时自动带 `?fresh=1` 重试一次，不用等边缘缓存那 5 分钟过期。
 
 ## 安全说明
 

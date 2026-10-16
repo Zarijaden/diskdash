@@ -717,6 +717,35 @@ function statsCacheKey(request: Request): Request {
   return new Request(url.toString(), { method: 'GET' });
 }
 
+/**
+ * 快照结构自检。
+ *
+ * KV 里存的是上次抓取的 JSON。只要 StatsData 的形状变了（比如 openlist 新增 base、
+ * 挂载点新增 path），旧快照就会一直被当成"有效数据"发出去，前端只能靠用户手动刷新
+ * 才能恢复。这里显式判断关键字段是否存在：
+ *   - 缺 key   -> 旧版本写的快照，需要重抓
+ *   - key 在但值为 null -> 正常（例如没配 OPENLIST_BASE_URL），不要重抓，否则会疯狂打源站
+ */
+function snapshotUpToDate(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const snapshot = data as Partial<StatsData>;
+
+  if (!snapshot.r2Storage || !snapshot.r2Operations || !snapshot.imghub) return false;
+
+  const openlist = snapshot.openlist as Record<string, unknown> | undefined;
+  if (!openlist || !Array.isArray(openlist.mounts)) return false;
+  // 旧快照没有 base 这个 key，会拿到 undefined。注意不要改成"base 为 null 就重抓"：
+  // 没配 OPENLIST_BASE_URL 时 base 恒为 null，那样会每次都重抓。
+  if (!('base' in openlist)) return false;
+
+  const mounts = openlist.mounts as unknown[];
+  return mounts.every((mount) => {
+    if (!mount || typeof mount !== 'object') return false;
+    const item = mount as Record<string, unknown>;
+    return 'path' in item && 'name' in item && 'status' in item;
+  });
+}
+
 function placeholderStats(env: Env): StatsData {
   return {
     updatedAt: null,
@@ -727,21 +756,25 @@ function placeholderStats(env: Env): StatsData {
   };
 }
 
-/** GET /api/stats —— 先查边缘缓存，未命中再读 KV 并回填缓存 */
+/** GET /api/stats —— 先查边缘缓存，未命中再读 KV 并回填缓存
+ *  加 ?fresh=1 可跳过边缘缓存（前端发现快照结构过期时会自动重试一次） */
 async function handleStats(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const origin = request.headers.get('Origin');
   const cors = corsHeaders(origin, env);
   const cache = caches.default;
   const cacheKey = statsCacheKey(request);
+  const bypassCache = new URL(request.url).searchParams.get('fresh') === '1';
 
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const body = await cached.text();
-    return jsonResponse(body, 200, {
-      ...cors,
-      'X-Cache': 'HIT',
-      'Cache-Control': 'public, max-age=' + CACHE_TTL_SECONDS,
-    });
+  if (!bypassCache) {
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      const body = await cached.text();
+      return jsonResponse(body, 200, {
+        ...cors,
+        'X-Cache': 'HIT',
+        'Cache-Control': 'public, max-age=' + CACHE_TTL_SECONDS,
+      });
+    }
   }
 
   const raw = await env.STATS_KV.get(STATS_KEY);
@@ -750,6 +783,24 @@ async function handleStats(request: Request, env: Env, ctx: ExecutionContext): P
     return jsonResponse(JSON.stringify(placeholderStats(env)), 200, {
       ...cors,
       'X-Cache': 'MISS',
+      'Cache-Control': 'no-store',
+    });
+  }
+
+  // 快照形状过期（通常是刚部署了新版本）：不等定时任务，直接重抓一次。
+  // 重抓会顺带把 KV 覆盖成新结构，所以只会发生一次，不会反复打源站。
+  let staleShape = false;
+  try {
+    staleShape = !snapshotUpToDate(JSON.parse(raw));
+  } catch {
+    staleShape = true;
+  }
+
+  if (staleShape) {
+    const fresh = await collectAndStore(env);
+    return jsonResponse(JSON.stringify(fresh), 200, {
+      ...cors,
+      'X-Cache': 'STALE-SHAPE',
       'Cache-Control': 'no-store',
     });
   }
@@ -889,9 +940,6 @@ export default {
     }
     if (url.pathname === '/api/proxy/imghub' && request.method === 'GET') {
       return handleProxy('imghub', request, env);
-    }
-    if (url.pathname === '/api/debug/fetch-test' && request.method === 'GET') {
-      return handleDebugFetchTest(env);
     }
     if (url.pathname === '/api/health') {
       return jsonResponse({ ok: true, time: nowIso() }, 200, corsHeaders(origin, env));
