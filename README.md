@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | R2 存储 + 操作额度 | `GET R2_USAGE_API_URL`：存储走 REST 逐桶实时统计，操作数走 GraphQL（约 24h 延迟） | R2 卡片显示 `DEGRADED` |
 | ImgHub / Infinicloud | `GET IMGHUB_API_BASE/api/manage/list?count=-1&recursive=true&channelName=IMGHUB_CHANNEL`，累加 `metadata.FileSizeBytes` / `FileSize`；总配额取该渠道 `quota.limitGB` | 显示 N/A |
-| OpenList | `GET /api/admin/storage/list`，只取挂载点名 | 挂载区显示 source error |
+| OpenList | `GET /api/admin/storage/list`，取挂载点名 + 挂载路径（`mount_path`） | 挂载区显示 `MOUNT SOURCE ERROR` |
 
 > R2 不再直连 Cloudflare GraphQL：用量由自家接口 `https://r2usage.zpbk.cc.cd/api` 提供，
 > 地址可用 `R2_USAGE_API_URL` 覆盖。每月免费额度（接口只给已用量）在
@@ -86,11 +86,21 @@
 | GET | `/api/proxy/imghub` | 注入 `IMGHUB_API_KEY` 反向代理 |
 | GET | `/api/health` | 健康检查 |
 
-### 关于 OpenList 代理
+### 挂载矩阵的跳转逻辑
 
-`OPENLIST_PROXY_MODE = "proxy"`（默认）时，Worker 会携带 Token 拉取后台页面并原样返回。
-因为后台是 SPA，页面内的相对资源路径不会被改写，可能显示不完整。
-如果只是想让浏览器跳到 OpenList 原生后台，把该值改成 `"redirect"`（此时无法注入 Token）。
+`/api/stats` 里 `openlist` 返回两组数据：
+
+- `openlist.base`：OpenList 站点源（`OPENLIST_BASE_URL` 的 scheme + host，运行时从配置推导）；
+- `openlist.mounts[].path`：每个挂载点自己的挂载路径（`mount_path`，例如 `/s3`）。
+
+前端不写死任何域名、也不维护"名字 → 路径"的映射表，点击时按 `base + path` 现场拼出跳转地址：
+
+    点击 S3 矩阵  ->  openlist.base + "/s3"  ->  https://<你的 OpenList 域名>/s3
+
+只对 path 做逐段 `encodeURIComponent`，保留分隔斜杠，所以中文名、空格挂载路径也能正确跳转。
+
+> `/api/proxy/openlist` 仍在，但挂载矩阵已不再使用它。纯静态前端不需要它——因为跳转是
+> 浏览器直接访问 OpenList 站点，后台自己会处理登录态。
 
 ## 安全说明
 

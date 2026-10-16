@@ -155,6 +155,18 @@
   }
   .mount:hover { transform: translateX(4px); border-color: var(--line-strong); }
   .mount:hover::after { transform: scaleX(1); }
+  .mount::before {
+    content: '\2197';
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted-2);
+    opacity: 0;
+    transition: opacity 0.18s ease, color 0.18s ease;
+  }
+  .mount:hover::before { opacity: 1; color: var(--accent); }
   .mount-name {
     font-family: var(--mono);
     font-size: 13px;
@@ -590,6 +602,24 @@
   }
 
   /* ---------------- 渲染：挂载矩阵 ---------------- */
+  /**
+   * 挂载路径 -> 跳转地址。
+   * 纯逻辑：站点源来自接口返回的 openlist.base，路径来自每个挂载点自己的 path，
+   * 这里不写死任何域名，也不写死 "名字 -> 路径" 的映射表。
+   * /s3 这种以 / 开头的路径会被逐段 encode，但保留斜杠本身。
+   */
+  function mountUrl(base, path) {
+    var origin = String(base || '').trim().replace(/\/+$/, '');
+    if (!origin) return null;
+    var rel = String(path == null ? '' : path).trim();
+    if (!rel) return origin + '/';
+    if (!/^\//.test(rel)) rel = '/' + rel;
+    var encoded = rel.split('/').map(function (segment) {
+      return encodeURIComponent(segment);
+    }).join('/');
+    return origin + encoded;
+  }
+
   function renderMounts(openlist) {
     var mounts = (openlist && openlist.mounts) || [];
     document.getElementById('mountCount').textContent = mounts.length + ' NODES';
@@ -604,7 +634,7 @@
     emptyEl.style.display = 'none';
     gridEl.innerHTML = mounts.map(function (mount) {
       var online = mount.status !== 'error';
-      return '<div class="mount">' +
+      return '<div class="mount" title="' + escapeHtml(mount.path || mount.name) + '">' +
         '<div class="mount-name">' + escapeHtml(mount.name) + '</div>' +
         '<div class="mount-foot">' +
           '<span class="tag">MOUNT</span>' +
@@ -615,13 +645,28 @@
       '</div>';
     }).join('');
 
-    Array.prototype.forEach.call(gridEl.querySelectorAll('.mount'), function (node) {
-      node.addEventListener('click', function () {
-        // 代理跳转：Worker 会注入 OPENLIST_TOKEN
-        try {
-          window.open(api('/api/proxy/openlist'), '_blank', 'noopener');
-        } catch (error) {
-          showToast(error.message, true);
+    Array.prototype.forEach.call(gridEl.querySelectorAll('.mount'), function (node, index) {
+      var mount = mounts[index] || {};
+      var target = mountUrl(openlist && openlist.base, mount.path || mount.name);
+
+      node.setAttribute('role', 'link');
+      node.setAttribute('tabindex', '0');
+      if (target) node.setAttribute('aria-label', mount.name + ' -> ' + target);
+
+      function go() {
+        if (!target) {
+          showToast('跳转地址不可用：后台缺少站点源', true);
+          return;
+        }
+        // 直接跳到该挂载点自己的路径，例如 https://host/s3
+        window.open(target, '_blank', 'noopener');
+      }
+
+      node.addEventListener('click', go);
+      node.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          go();
         }
       });
     });

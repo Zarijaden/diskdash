@@ -117,11 +117,15 @@ export interface R2OperationsStats {
 
 export interface MountPoint {
   name: string;
+  /** 后台里的挂载路径（OpenList mount_path），前端用它拼跳转地址 */
+  path: string;
   status: 'online' | 'error';
 }
 
 export interface OpenListStats {
   mounts: MountPoint[];
+  /** OpenList 站点源（scheme + host），前端据此把 path 拼成跳转地址 */
+  base: string | null;
   error: string | null;
 }
 
@@ -603,11 +607,26 @@ async function fetchImghubChannelCapacity(
 }
 
 /**
- * 5.4 OpenList —— 仅提取挂载点名称，不取容量、不取文件列表
+ * 5.4 OpenList 站点源 —— 只取 scheme + host，去掉配置里可能带的子路径。
+ * 前端拿到它以后自己拼 `base + 挂载路径` 作为跳转地址，不做任何域名硬编码。
+ */
+function openlistBase(env: Env): string | null {
+  if (!env.OPENLIST_BASE_URL) return null;
+  try {
+    const parsed = new URL(env.OPENLIST_BASE_URL.trim());
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 5.5 OpenList 挂载点 —— 仅提取挂载点名与挂载路径，不取容量、不取文件列表。
+ *     挂载路径就是前端点击后要跳转的目标（例如 /s3），由前端拼成完整地址。
  *     所需 Secret：OPENLIST_TOKEN（Alist / OpenList 的 Authorization 直接放 token）
  */
 async function fetchOpenlist(env: Env): Promise<OpenListStats> {
-  const result: OpenListStats = { mounts: [], error: null };
+  const result: OpenListStats = { mounts: [], base: openlistBase(env), error: null };
   if (!env.OPENLIST_BASE_URL) {
     result.error = 'missing_config';
     return result;
@@ -641,8 +660,11 @@ async function fetchOpenlist(env: Env): Promise<OpenListStats> {
       const item = raw as Record<string, unknown>;
       const rawStatus = item.status;
       const online = rawStatus === undefined || rawStatus === 'work' || rawStatus === 'working';
+      const name = String(item.mount_path || item.name || item.driver || 'unknown');
       return {
-        name: String(item.mount_path || item.name || item.driver || 'unknown'),
+        name,
+        // 挂载路径就是跳转目标，后端给什么就用什么；缺字段时退回挂载名。
+        path: String(item.mount_path || name),
         status: online ? 'online' : 'error',
       };
     });
@@ -674,7 +696,7 @@ export async function collectAll(env: Env): Promise<StatsData> {
     r2Storage: usage.storage,
     r2Operations: usage.operations,
     imghub: settle(imghub, () => ({ ...emptyQuota(), error: 'source_crashed' })),
-    openlist: settle(openlist, () => ({ mounts: [], error: 'source_crashed' })),
+    openlist: settle(openlist, () => ({ mounts: [], base: openlistBase(env), error: 'source_crashed' })),
   };
 }
 
@@ -695,13 +717,13 @@ function statsCacheKey(request: Request): Request {
   return new Request(url.toString(), { method: 'GET' });
 }
 
-function placeholderStats(): StatsData {
+function placeholderStats(env: Env): StatsData {
   return {
     updatedAt: null,
     r2Storage: emptyR2Storage(null),
     r2Operations: emptyOps(),
     imghub: emptyQuota(),
-    openlist: { mounts: [], error: null },
+    openlist: { mounts: [], base: openlistBase(env), error: null },
   };
 }
 
@@ -725,7 +747,7 @@ async function handleStats(request: Request, env: Env, ctx: ExecutionContext): P
   const raw = await env.STATS_KV.get(STATS_KEY);
   if (!raw) {
     // 首次部署、KV 尚无数据：返回占位数据，且不写缓存
-    return jsonResponse(JSON.stringify(placeholderStats()), 200, {
+    return jsonResponse(JSON.stringify(placeholderStats(env)), 200, {
       ...cors,
       'X-Cache': 'MISS',
       'Cache-Control': 'no-store',
@@ -834,43 +856,6 @@ async function handleProxy(
   } catch (error) {
     return jsonResponse({ error: 'proxy_failed', detail: errorMessage(error) }, 502, cors);
   }
-}
-
-/**
- * 临时诊断路由：GET /api/debug/fetch-test
- * 对比 Worker -> zpbk.cc.cd 与 Worker -> httpbin.org 的 fetch 结果（状态码 + 完整响应头）。
- * 目的是判断 400 是平台层拦的、还是目标站的问题。用完删掉。
- */
-async function handleDebugFetchTest(env: Env): Promise<Response> {
-  const auth: Record<string, string> = {
-    Authorization: 'Bearer ' + (env.IMGHUB_API_KEY || ''),
-    Accept: '*/*',
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  };
-
-  async function probe(name: string, url: string, headers: Record<string, string>) {
-    try {
-      const resp = await fetch(url, { headers });
-      const out: Record<string, string> = {};
-      resp.headers.forEach((value, key) => {
-        out[key] = value;
-      });
-      const body = (await resp.text()).slice(0, 200);
-      console.error('[debug] ' + name + ':', resp.status, JSON.stringify(out), body);
-      return { url, status: resp.status, headers: out, body };
-    } catch (error) {
-      const detail = errorMessage(error);
-      console.error('[debug] ' + name + ' threw:', detail);
-      return { url, error: detail };
-    }
-  }
-
-  return jsonResponse({
-    zpbk: await probe('zpbk', 'https://zpbk.cc.cd/api/manage/list?count=-1', auth),
-    // 对照组：不带任何密钥，只验证 Worker 出口能不能正常 fetch 公网
-    httpbin: await probe('httpbin', 'https://httpbin.org/get', { Accept: '*/*' }),
-  });
 }
 
 /* ===========================================================================
