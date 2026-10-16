@@ -32,7 +32,7 @@ preview_id = "7e3f92715c0a4c8c989c988ed07a4f10"
 # ============================================================================
 [vars]
 # 【必填】允许跨域访问的 Pages 源。可写多个，用英文逗号分隔，不要带结尾斜杠。
-# 例如："https://diskdash.pages.dev,https://disk.example.com"
+# 例如："https://diskdash.pages.dev,https://zarijaden.cc.cd"
 ALLOWED_ORIGIN = "https://zarijaden.cc.cd,https://diskdash.pages.dev"
 
 # ---------------------------------------------------------------------------
@@ -50,11 +50,11 @@ R2_CLASS_B_LIMIT = "10000000"
 # 2) ImgHub / Infinicloud —— 走 ImgHub 管理 API，按渠道读已用容量
 # ---------------------------------------------------------------------------
 # ImgHub 实例根地址（管理 API 基址）
-IMGHUB_API_BASE = "https://zpbk.cc.cd"
+IMGHUB_API_BASE = "https://zpbk.pages.dev"
 # InfiniCLOUD 在图床里的渠道名（ChannelName），对应 metadata.channelStats 的 key
 IMGHUB_CHANNEL = "infinicloud"
 # 兜底总配额：ImgHub 渠道未配置 quota.limitGB 时使用，支持 "20GB" / 字节数；留空则只显示已用
-INFINICLOUD_TOTAL_CAPACITY = ""
+INFINICLOUD_TOTAL_CAPACITY = "25GB"
 # ImgHub 后台地址，/api/proxy/imghub 代理跳转的目标
 IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
 
@@ -71,7 +71,7 @@ invocation_logs = true
 
 [previews.vars]
 ALLOWED_ORIGIN = "https://zarijaden.cc.cd,https://diskdash.pages.dev"
-IMGHUB_API_BASE = "https://zpbk.cc.cd"
+IMGHUB_API_BASE = "https://zpbk.pahes.dev"
 IMGHUB_CHANNEL = "infinicloud"
 IMGHUB_PROXY_URL = "https://zpbk.cc.cd/dashboard"
 INFINICLOUD_TOTAL_CAPACITY = ""
